@@ -37,6 +37,15 @@ struct Options {
     batch_log: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct BatchScenario<'a> {
+    options: &'a Options,
+    role: Side,
+    style: CampaignStyle,
+    region: Option<&'static RegionProfile>,
+    selected_party: Option<&'static PartyProfile>,
+}
+
 fn main() {
     if let Err(message) = run() {
         eprintln!("錯誤：{message}\n");
@@ -85,15 +94,14 @@ fn run() -> Result<(), String> {
         options.style
     };
     let (region, selected_party) = resolve_scenario(&options, role)?;
-    let mut game = new_scenario_game(
-        &options,
+    let scenario = BatchScenario {
+        options: &options,
         role,
         style,
-        options.seed,
         region,
         selected_party,
-        ModelParameters::default(),
-    );
+    };
+    let mut game = new_scenario_game(&scenario, options.seed, ModelParameters::default());
     print_intro(&game, options.seed);
 
     if options.auto {
@@ -151,29 +159,25 @@ fn resolve_scenario(
 }
 
 fn new_scenario_game(
-    options: &Options,
-    role: Side,
-    style: CampaignStyle,
+    scenario: &BatchScenario<'_>,
     seed: u64,
-    region: Option<&'static RegionProfile>,
-    selected_party: Option<&'static PartyProfile>,
     model_parameters: ModelParameters,
 ) -> GameState {
-    match region {
+    match scenario.region {
         Some(region) => GameState::new_local_with_party_and_parameters(
-            options.year,
-            role,
+            scenario.options.year,
+            scenario.role,
             seed,
-            style,
+            scenario.style,
             region,
-            selected_party,
+            scenario.selected_party,
             model_parameters,
         ),
         None => GameState::new_with_style_and_parameters(
-            options.year,
-            role,
+            scenario.options.year,
+            scenario.role,
             seed,
-            style,
+            scenario.style,
             model_parameters,
         ),
     }
@@ -635,15 +639,18 @@ fn run_batch(
     let mut records = Vec::with_capacity(runs as usize * styles.len());
 
     for &style in &styles {
+        let scenario = BatchScenario {
+            options,
+            role,
+            style,
+            region,
+            selected_party,
+        };
         for offset in 0..runs {
             let seed = options.seed + u64::from(offset);
             records.push(simulate_batch_record(
-                options,
-                role,
-                style,
+                &scenario,
                 seed,
-                region,
-                selected_party,
                 ModelParameters::default(),
                 "baseline",
                 1.0,
@@ -682,25 +689,13 @@ fn run_batch(
 }
 
 fn simulate_batch_record(
-    options: &Options,
-    role: Side,
-    style: CampaignStyle,
+    scenario: &BatchScenario<'_>,
     seed: u64,
-    region: Option<&'static RegionProfile>,
-    selected_party: Option<&'static PartyProfile>,
     model_parameters: ModelParameters,
     sensitivity_parameter: &'static str,
     multiplier: f64,
 ) -> BatchRecord {
-    let mut game = new_scenario_game(
-        options,
-        role,
-        style,
-        seed,
-        region,
-        selected_party,
-        model_parameters,
-    );
+    let mut game = new_scenario_game(scenario, seed, model_parameters);
     run_auto(&mut game, false);
     let result = game.finish();
     let winner = &game.candidates[result.winner_index];
@@ -714,7 +709,7 @@ fn simulate_batch_record(
         .map(|(_, share)| *share)
         .fold(0.0, f64::max);
     BatchRecord {
-        style,
+        style: scenario.style,
         seed,
         sensitivity_parameter,
         multiplier,
@@ -744,16 +739,19 @@ fn run_sensitivity_batch(
         .seed
         .checked_add(u64::from(runs - 1))
         .ok_or_else(|| "seed 範圍超出 u64 上限。".to_string())?;
+    let scenario = BatchScenario {
+        options,
+        role,
+        style: options.style,
+        region,
+        selected_party,
+    };
     let mut records = Vec::with_capacity(runs as usize * (1 + SensitivityParameter::ALL.len() * 2));
     for offset in 0..runs {
         let seed = options.seed + u64::from(offset);
         records.push(simulate_batch_record(
-            options,
-            role,
-            options.style,
+            &scenario,
             seed,
-            region,
-            selected_party,
             ModelParameters::default(),
             "baseline",
             1.0,
@@ -767,12 +765,8 @@ fn run_sensitivity_batch(
             for offset in 0..runs {
                 let seed = options.seed + u64::from(offset);
                 records.push(simulate_batch_record(
-                    options,
-                    role,
-                    options.style,
+                    &scenario,
                     seed,
-                    region,
-                    selected_party,
                     model_parameters,
                     parameter.key(),
                     multiplier,
