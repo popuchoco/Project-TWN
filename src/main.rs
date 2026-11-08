@@ -754,7 +754,7 @@ fn select_interactive_action(
                     String::new()
                 };
                 println!(
-                    "  {}) [{}] {}｜預算 {}｜支持 {:+.2}｜信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}｜策略 {:.2}{}{}",
+                    "  {}) [{}] {}｜預算 {}｜支持 {:+.2}｜信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}｜策略分 {:.2}{}{}",
                     option_index + 1,
                     recommendation.preview.category.label(),
                     recommendation.preview.action_name,
