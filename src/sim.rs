@@ -1,3 +1,4 @@
+use crate::campaign::{anniversary_week, CampaignSetup, EventTimeline, DATED_EVENTS};
 use crate::history::{
     baseline_election, challenger_candidate_index, events_for_campaign, incumbent_candidate_index,
     party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
@@ -9,7 +10,6 @@ pub const CAMPAIGN_ROUNDS: u8 = 12;
 pub const DAYS_PER_WEEK: u8 = 7;
 const DEFAULT_SEED: u64 = 0x0054_574E_5F53_494D;
 const MAX_BUDGET: i32 = 120;
-const WEEKLY_FUNDING: i32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -1001,6 +1001,7 @@ pub struct GameState {
     pub region: Option<&'static RegionProfile>,
     pub side: Side,
     pub style: CampaignStyle,
+    pub setup: CampaignSetup,
     model_parameters: ModelParameters,
     pub player_attributes: CandidateAttributes,
     pub player_index: usize,
@@ -1021,7 +1022,7 @@ pub struct GameState {
     pub events: Vec<&'static EventCard>,
     /// One seeded issue focus per campaign week. `events` remains the full
     /// eligible event pool displayed to the player.
-    event_schedule: Vec<&'static EventCard>,
+    event_schedule: Vec<Option<&'static EventCard>>,
     weekly_objective_schedule: Vec<&'static WeeklyObjective>,
     weekly_objective_progress: u8,
     weekly_objective_completed: bool,
@@ -1177,8 +1178,34 @@ impl GameState {
         style: CampaignStyle,
         model_parameters: ModelParameters,
     ) -> Self {
+        Self::new_with_setup(
+            campaign_year,
+            side,
+            seed,
+            style,
+            model_parameters,
+            CampaignSetup::default(),
+        )
+    }
+
+    pub fn new_with_setup(
+        campaign_year: u16,
+        side: Side,
+        seed: u64,
+        style: CampaignStyle,
+        model_parameters: ModelParameters,
+        setup: CampaignSetup,
+    ) -> Self {
         let election = baseline_election(campaign_year);
-        Self::from_election(campaign_year, side, election, seed, style, model_parameters)
+        Self::from_election(
+            campaign_year,
+            side,
+            election,
+            seed,
+            style,
+            model_parameters,
+            setup,
+        )
     }
 
     pub fn new_local_with_style(
@@ -1219,6 +1246,29 @@ impl GameState {
         selected_party: Option<&'static PartyProfile>,
         model_parameters: ModelParameters,
     ) -> Self {
+        Self::new_local_with_party_and_setup(
+            campaign_year,
+            side,
+            seed,
+            style,
+            region,
+            selected_party,
+            model_parameters,
+            CampaignSetup::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_local_with_party_and_setup(
+        campaign_year: u16,
+        side: Side,
+        seed: u64,
+        style: CampaignStyle,
+        region: &'static RegionProfile,
+        selected_party: Option<&'static PartyProfile>,
+        model_parameters: ModelParameters,
+        setup: CampaignSetup,
+    ) -> Self {
         let mut game = Self::from_election(
             campaign_year,
             side,
@@ -1226,6 +1276,7 @@ impl GameState {
             seed,
             style,
             model_parameters,
+            setup,
         );
         game.baseline_year = 2022;
         game.region = Some(region);
@@ -1262,6 +1313,7 @@ impl GameState {
         seed: u64,
         style: CampaignStyle,
         model_parameters: ModelParameters,
+        setup: CampaignSetup,
     ) -> Self {
         let player_index = match side {
             Side::Incumbent => incumbent_candidate_index(election),
@@ -1291,9 +1343,25 @@ impl GameState {
             Side::Challenger => (50.0, 50.0),
         };
         let voter_segments = make_voter_segments(&polls);
-        let events = events_for_campaign(campaign_year);
+        let all_events = events_for_campaign(campaign_year);
+        let events = setup.events(&all_events);
         let mut rng = Rng::new(seed);
-        let event_schedule = make_event_schedule(&events, &mut rng);
+        let event_schedule = match setup.timeline {
+            EventTimeline::SeededWeekly => make_event_schedule(&events, &mut rng)
+                .into_iter()
+                .map(Some)
+                .collect(),
+            EventTimeline::AnniversaryMapped => {
+                let election_date = if campaign_year == election.year {
+                    election.date
+                } else if campaign_year == 2026 {
+                    "2026-11-28"
+                } else {
+                    election.date
+                };
+                make_anniversary_event_schedule(&events, election_date)
+            }
+        };
         let weekly_objective_schedule = make_weekly_objective_schedule(side, &mut rng);
 
         Self {
@@ -1302,13 +1370,14 @@ impl GameState {
             region: None,
             side,
             style,
+            setup,
             model_parameters,
             player_attributes: style.attributes(),
             player_index,
             candidates,
             polls,
             voter_segments,
-            budget: 100,
+            budget: setup.difficulty.starting_budget(),
             headquarters_established: false,
             supporters_association_established: false,
             field_capacity: 0.0,
@@ -1335,7 +1404,10 @@ impl GameState {
     }
 
     pub fn current_event(&self) -> Option<&'static EventCard> {
-        self.event_schedule.get(self.round as usize).copied()
+        self.event_schedule
+            .get(self.round as usize)
+            .copied()
+            .flatten()
     }
 
     pub fn current_objective(&self) -> Option<&'static WeeklyObjective> {
@@ -1759,7 +1831,7 @@ impl GameState {
         let mut weekly_funding = 0;
         if day == DAYS_PER_WEEK {
             let before_funding = self.budget;
-            self.budget = (self.budget + WEEKLY_FUNDING).min(MAX_BUDGET);
+            self.budget = (self.budget + self.setup.difficulty.weekly_funding()).min(MAX_BUDGET);
             weekly_funding = self.budget - before_funding;
             self.round += 1;
             self.day = 0;
@@ -1966,11 +2038,31 @@ impl GameState {
         if self.round == CAMPAIGN_ROUNDS && self.day != 0 {
             return Err("a completed campaign must be at the first day boundary");
         }
-        if !self.events.is_empty() && self.event_schedule.len() != CAMPAIGN_ROUNDS as usize {
-            return Err("an eligible event pool must produce one scheduled focus per week");
+        match self.setup.timeline {
+            EventTimeline::SeededWeekly => {
+                if (!self.events.is_empty()
+                    && (self.event_schedule.len() != CAMPAIGN_ROUNDS as usize
+                        || self.event_schedule.iter().any(Option::is_none)))
+                    || (self.events.is_empty() && !self.event_schedule.is_empty())
+                {
+                    return Err("seeded event scheduling must fill each campaign week when events are available");
+                }
+            }
+            EventTimeline::AnniversaryMapped => {
+                if self.event_schedule.len() != CAMPAIGN_ROUNDS as usize {
+                    return Err(
+                        "anniversary event scheduling must provide one slot per campaign week",
+                    );
+                }
+            }
         }
-        if self.events.is_empty() && !self.event_schedule.is_empty() {
-            return Err("event schedule must be empty when no events are eligible");
+        if self.event_schedule.iter().flatten().any(|event| {
+            !self
+                .events
+                .iter()
+                .any(|eligible| eligible.title == event.title)
+        }) {
+            return Err("scheduled events must come from the selected event pack");
         }
         if self.weekly_objective_schedule.len() != CAMPAIGN_ROUNDS as usize
             || self.weekly_objective_schedule.iter().any(|objective| {
@@ -2224,6 +2316,26 @@ fn make_event_schedule(events: &[&'static EventCard], rng: &mut Rng) -> Vec<&'st
     schedule
 }
 
+fn make_anniversary_event_schedule(
+    events: &[&'static EventCard],
+    election_date: &str,
+) -> Vec<Option<&'static EventCard>> {
+    let mut schedule = vec![None; CAMPAIGN_ROUNDS as usize];
+    for event in events {
+        let Some(dated_event) = DATED_EVENTS.iter().find(|dated| dated.title == event.title) else {
+            continue;
+        };
+        let Some(week) = anniversary_week(dated_event.date, election_date) else {
+            continue;
+        };
+        let slot = &mut schedule[week as usize];
+        if slot.is_none() {
+            *slot = Some(*event);
+        }
+    }
+    schedule
+}
+
 fn make_weekly_objective_schedule(side: Side, rng: &mut Rng) -> Vec<&'static WeeklyObjective> {
     let objectives = match side {
         Side::Incumbent => INCUMBENT_WEEKLY_OBJECTIVES,
@@ -2391,7 +2503,10 @@ mod tests {
         }
         assert_eq!(game.round, 1);
         assert_eq!(game.day, 0);
-        assert_eq!(game.budget, before - 3 + WEEKLY_FUNDING);
+        assert_eq!(
+            game.budget,
+            before - 3 + crate::campaign::CampaignDifficulty::Standard.weekly_funding()
+        );
         assert!(game.polls.iter().all(|share| *share >= 0.0));
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
         assert!(game.validate().is_ok());
@@ -2511,22 +2626,62 @@ mod tests {
         let left_titles: Vec<_> = left
             .event_schedule
             .iter()
-            .map(|event| event.title)
+            .filter_map(|event| event.map(|event| event.title))
             .collect();
         let right_titles: Vec<_> = right
             .event_schedule
             .iter()
-            .map(|event| event.title)
+            .filter_map(|event| event.map(|event| event.title))
             .collect();
 
         assert_eq!(left_titles, right_titles);
         assert_eq!(left.event_schedule.len(), CAMPAIGN_ROUNDS as usize);
         assert!(left_titles.windows(2).all(|pair| pair[0] != pair[1]));
-        assert!(left.event_schedule.iter().all(|event| left
+        assert!(left.event_schedule.iter().flatten().all(|event| left
             .events
             .iter()
             .any(|eligible| eligible.title == event.title)));
         assert!(left.validate().is_ok());
+    }
+
+    #[test]
+    fn anniversary_timeline_maps_known_event_and_event_pack_filters_pool() {
+        let setup = CampaignSetup {
+            timeline: EventTimeline::AnniversaryMapped,
+            ..CampaignSetup::default()
+        };
+        let mapped = GameState::new_with_setup(
+            2004,
+            Side::Challenger,
+            4242,
+            CampaignStyle::Balanced,
+            ModelParameters::default(),
+            setup,
+        );
+        assert_eq!(
+            mapped.event_schedule[11].map(|event| event.title),
+            Some("三一九槍擊案與選後爭議")
+        );
+        assert_eq!(mapped.event_schedule.len(), CAMPAIGN_ROUNDS as usize);
+        assert!(mapped.validate().is_ok());
+
+        let democracy = GameState::new_with_setup(
+            2024,
+            Side::Challenger,
+            4242,
+            CampaignStyle::Balanced,
+            ModelParameters::default(),
+            CampaignSetup {
+                event_pack: crate::campaign::EventPack::Democracy,
+                timeline: EventTimeline::AnniversaryMapped,
+                ..CampaignSetup::default()
+            },
+        );
+        assert!(democracy
+            .events
+            .iter()
+            .all(|event| crate::campaign::EventPack::Democracy.includes(event)));
+        assert!(democracy.validate().is_ok());
     }
 
     #[test]

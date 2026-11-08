@@ -40,7 +40,7 @@ jobs:
           $rows = @(Get-Content target/ci-batch-runs.tsv)
           if ($rows.Count -ne 9) { throw "Expected a header and 8 style/seed rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 41) { throw "Unexpected batch TSV column count." }
+            if ($row.Split("`t").Count -ne 44) { throw "Unexpected batch TSV column count." }
           }
 
       - name: Smoke-test paired parameter sensitivity
@@ -49,7 +49,7 @@ jobs:
           $rows = @(Get-Content target/ci-sensitivity-runs.tsv)
           if ($rows.Count -ne 31) { throw "Expected a header and 30 one-factor rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 41) { throw "Unexpected sensitivity TSV column count." }
+            if ($row.Split("`t").Count -ne 44) { throw "Unexpected sensitivity TSV column count." }
           }
 
       - name: Smoke-test paired parameter interaction sensitivity
@@ -58,7 +58,7 @@ jobs:
           $rows = @(Get-Content target/ci-interaction-runs.tsv)
           if ($rows.Count -ne 85) { throw "Expected a header and 84 two-factor corner rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 41) { throw "Unexpected interaction TSV column count." }
+            if ($row.Split("`t").Count -ne 44) { throw "Unexpected interaction TSV column count." }
           }
 
       - name: Smoke-test strategy profile comparison
@@ -67,7 +67,7 @@ jobs:
           $rows = @(Get-Content target/ci-strategy-runs.tsv)
           if ($rows.Count -ne 8) { throw "Expected a header and 7 strategy rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 41) { throw "Unexpected strategy TSV column count." }
+            if ($row.Split("`t").Count -ne 44) { throw "Unexpected strategy TSV column count." }
           }
           $headers = $rows[0].Split("`t")
           $positiveIndex = [Array]::IndexOf($headers, "positive_actions")
@@ -90,7 +90,7 @@ jobs:
           }
           $strategies = @($rows | Select-Object -Skip 1 | ForEach-Object { $_.Split("`t")[5] } | Sort-Object -Unique)
           if ($strategies.Count -ne 7) { throw "Expected seven distinct strategy profiles; got $($strategies.Count)." }
-          @("1", "q") | cargo run -- --year 2024 --role challenger --strategy issue --seed 77 | Out-File -Encoding utf8 target/ci-strategy-advice.txt
+          @("1", "1", "4", "1", "6", "b", "q") | cargo run -- --year 2024 --role challenger --strategy issue --seed 77 | Out-File -Encoding utf8 target/ci-strategy-advice.txt
           $advice = Get-Content target/ci-strategy-advice.txt -Raw
           if (-not $advice.Contains("策略分")) { throw "Interactive action list omitted strategy ranking." }
           if (-not $advice.Contains("實際變化")) { throw "Action outcome omitted realized support change." }
@@ -98,3 +98,14 @@ jobs:
           if (-not $advice.Contains("中立選戰")) { throw "Interactive action list omitted neutral tactics." }
           if (-not $advice.Contains("負面／高風險選戰")) { throw "Interactive action list omitted negative tactics." }
           if (-not $advice.Contains("預估揭露")) { throw "Interactive action list omitted exposure forecasts." }
+
+      - name: Smoke-test campaign setup and date mapping
+        run: |
+          cargo run -- --batch 1 --year 2004 --role challenger --difficulty hard --event-pack democracy --timeline date --seed 1 --batch-log target/ci-config.tsv
+          $rows = @(Get-Content target/ci-config.tsv)
+          $headers = $rows[0].Split("`t")
+          $values = $rows[1].Split("`t")
+          if ($rows.Count -ne 2 -or $values.Count -ne 44) { throw "Campaign setup smoke test has unexpected output shape." }
+          if ($values[[Array]::IndexOf($headers, "difficulty")] -ne "hard") { throw "Difficulty was not recorded." }
+          if ($values[[Array]::IndexOf($headers, "event_pack")] -ne "democracy") { throw "Event pack was not recorded." }
+          if ($values[[Array]::IndexOf($headers, "timeline")] -ne "date") { throw "Timeline was not recorded." }

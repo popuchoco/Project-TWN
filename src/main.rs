@@ -1,11 +1,12 @@
+use project_twn::campaign::{CampaignDifficulty, CampaignSetup, EventPack, EventTimeline};
 use project_twn::history::{
     find_party, find_region, PartyProfile, RegionProfile, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS,
     PARTY_PROFILES, REGIONS, VOTER_SEGMENTS,
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    campaign_actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
-    ModelParameters, SensitivityParameter, Side, TacticCategory, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+    ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState, ModelParameters,
+    SensitivityParameter, Side, TacticCategory, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
 use project_twn::strategy::{
     StrategyAxis, StrategyEngine, StrategyProfile, StrategyRecommendation,
@@ -16,8 +17,8 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
-const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition";
+const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition\tdifficulty\tevent_pack\ttimeline";
 const MAX_BATCH_RUNS: u32 = 10_000;
 const MAX_STRATEGY_SWEEP_RUNS: u32 = 1_000;
 const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
@@ -35,6 +36,7 @@ struct Options {
     list_parties: bool,
     region: Option<String>,
     party: Option<String>,
+    setup: CampaignSetup,
     primary: bool,
     log: Option<String>,
     batch: Option<u32>,
@@ -52,6 +54,90 @@ struct BatchScenario<'a> {
     style: CampaignStyle,
     region: Option<&'static RegionProfile>,
     selected_party: Option<&'static PartyProfile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionMenuCategory {
+    PolicyGovernance,
+    GroundOrganization,
+    CommunityCare,
+    PublicCommunication,
+    Coalition,
+    HighRisk,
+    Preparation,
+}
+
+impl ActionMenuCategory {
+    const ALL: [Self; 7] = [
+        Self::PolicyGovernance,
+        Self::GroundOrganization,
+        Self::CommunityCare,
+        Self::PublicCommunication,
+        Self::Coalition,
+        Self::HighRisk,
+        Self::Preparation,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PolicyGovernance => "政策與治理",
+            Self::GroundOrganization => "組織與街頭動員",
+            Self::CommunityCare => "社區關懷與宗教行程",
+            Self::PublicCommunication => "辯論、媒體與政見",
+            Self::Coalition => "民調協調與跨黨整合",
+            Self::HighRisk => "高風險攻防",
+            Self::Preparation => "整備與休息",
+        }
+    }
+
+    fn includes(self, id: ActionId) -> bool {
+        match self {
+            Self::PolicyGovernance => matches!(
+                id,
+                ActionId::PolicyDelivery
+                    | ActionId::CrisisResponse
+                    | ActionId::TransparencyReport
+                    | ActionId::PublicServices
+                    | ActionId::OversightPetition
+            ),
+            Self::GroundOrganization => matches!(
+                id,
+                ActionId::CommunityTour
+                    | ActionId::LegalAssembly
+                    | ActionId::CampaignHeadquarters
+                    | ActionId::VolunteerCanvassing
+                    | ActionId::GroundTeamLeaflets
+                    | ActionId::StreetSweep
+                    | ActionId::TurnoutMobilization
+                    | ActionId::SupportersAssociation
+            ),
+            Self::CommunityCare => matches!(
+                id,
+                ActionId::ReligiousCommunityVisit
+                    | ActionId::PilgrimageParticipation
+                    | ActionId::MassAttendance
+                    | ActionId::VulnerableCommunityCare
+                    | ActionId::DisasterResponseVisit
+            ),
+            Self::PublicCommunication => matches!(
+                id,
+                ActionId::PolicyForum
+                    | ActionId::PublicMessage
+                    | ActionId::Debate
+                    | ActionId::MediaInterview
+                    | ActionId::PolicyPresentation
+                    | ActionId::FactCheckResponse
+            ),
+            Self::Coalition => matches!(id, ActionId::CoalitionTalks | ActionId::PollCoordination),
+            Self::HighRisk => matches!(
+                id,
+                ActionId::FabricatedPoll
+                    | ActionId::AnonymousSmear
+                    | ActionId::CoordinatedOpinionWar
+            ),
+            Self::Preparation => id == ActionId::RestAndPrepare,
+        }
+    }
 }
 
 fn main() {
@@ -172,7 +258,7 @@ fn new_scenario_game(
     model_parameters: ModelParameters,
 ) -> GameState {
     match scenario.region {
-        Some(region) => GameState::new_local_with_party_and_parameters(
+        Some(region) => GameState::new_local_with_party_and_setup(
             scenario.options.year,
             scenario.role,
             seed,
@@ -180,13 +266,15 @@ fn new_scenario_game(
             region,
             scenario.selected_party,
             model_parameters,
+            scenario.options.setup,
         ),
-        None => GameState::new_with_style_and_parameters(
+        None => GameState::new_with_setup(
             scenario.options.year,
             scenario.role,
             seed,
             scenario.style,
             model_parameters,
+            scenario.options.setup,
         ),
     }
 }
@@ -205,6 +293,7 @@ fn parse_args() -> Result<Options, String> {
         list_parties: false,
         region: None,
         party: None,
+        setup: CampaignSetup::default(),
         primary: false,
         log: None,
         batch: None,
@@ -236,6 +325,27 @@ fn parse_args() -> Result<Options, String> {
                     args.next()
                         .ok_or_else(|| "--party 後面需要政黨名稱或別名".to_string())?,
                 )
+            }
+            "--difficulty" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--difficulty 後面需要 story、standard 或 hard".to_string())?;
+                options.setup.difficulty = CampaignDifficulty::parse(&value)
+                    .ok_or_else(|| format!("未知難度：{value}；可用 story、standard、hard"))?;
+            }
+            "--event-pack" => {
+                let value = args.next().ok_or_else(|| {
+                    "--event-pack 後面需要 all、democracy、cross-strait、local 或 media".to_string()
+                })?;
+                options.setup.event_pack =
+                    EventPack::parse(&value).ok_or_else(|| format!("未知事件包：{value}"))?;
+            }
+            "--timeline" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--timeline 後面需要 weekly 或 date".to_string())?;
+                options.setup.timeline = EventTimeline::parse(&value)
+                    .ok_or_else(|| format!("未知事件排程：{value}；可用 weekly、date"))?;
             }
             "--log" => {
                 options.log = Some(
@@ -415,6 +525,12 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
         strategy.label(),
         seed
     );
+    println!(
+        "難度：{}　事件包：{}　事件時序：{}",
+        game.setup.difficulty.label(),
+        game.setup.event_pack.label(),
+        game.setup.timeline.label()
+    );
     if let Some(region) = game.region {
         println!(
             "地方情境：{}；上屆首長政黨為 {}。",
@@ -553,81 +669,128 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
             );
         }
         let recommendations = engine.rank_actions(game);
-        let available_actions = campaign_actions_for(game.side);
-        for (index, recommendation) in recommendations.iter().enumerate() {
-            let action = available_actions
-                .iter()
-                .find(|action| action.id == recommendation.preview.id)
-                .copied()
-                .ok_or_else(|| "策略引擎回傳了不適用的行動。".to_string())?;
-            let rationale = if recommendation.rationales.is_empty() {
-                "符合目前整體盤勢".to_string()
-            } else {
-                recommendation.rationales.join("、")
-            };
-            let risk = if recommendation.preview.detection_probability > 0.0 {
-                format!(
-                    "｜預估揭露 {:.0}%／期望懲處資源 {:.2}",
-                    recommendation.preview.detection_probability * 100.0,
-                    recommendation.preview.expected_sanction_fine
-                )
-            } else {
-                String::new()
-            };
-            let infrastructure = if recommendation.preview.infrastructure_delta > 0.0 {
-                format!(
-                    "｜組織量能 +{:.0}",
-                    recommendation.preview.infrastructure_delta
-                )
-            } else {
-                String::new()
-            };
-            println!(
-                "  {}) [{}] {}（預算 {}）— 預估支持度 {:+.2} 點〔直接 {:+.2}／整合 {:+.2}／對手平均回應 {:+.2}〕、信任 {:+.2}、動員 {:+.2}、體力 {:+.2}｜策略分 {:.2}｜{}{}{}｜{}",
-                index + 1,
-                recommendation.preview.category.label(),
-                action.name,
-                recommendation.preview.cost,
-                recommendation.preview.expected_support_delta,
-                recommendation.preview.direct_support_delta,
-                recommendation.preview.coordination_support_delta,
-                recommendation.preview.expected_response_delta,
-                recommendation.preview.trust_delta,
-                recommendation.preview.turnout_delta,
-                recommendation.preview.stamina_delta,
-                recommendation.score,
-                rationale,
-                risk,
-                infrastructure,
-                action.description,
-            );
-        }
-        print!("選行動（輸入編號，q 結束）：");
-        io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        if input.trim().eq_ignore_ascii_case("q") {
+        let selected = select_interactive_action(&recommendations)?;
+        let Some(action_id) = selected else {
             break;
-        }
-        let choice: usize = match input.trim().parse() {
-            Ok(value) => value,
-            Err(_) => {
-                println!("請輸入行動編號。\n");
-                continue;
-            }
         };
-        let Some(recommendation) = recommendations.get(choice.saturating_sub(1)) else {
-            println!("沒有這個選項。\n");
-            continue;
-        };
-        match game.apply_action(recommendation.preview.id) {
+        match game.apply_action(action_id) {
             Ok(outcome) => print_action_outcome(game, &outcome),
             Err(message) => println!("{message}\n"),
         }
     }
     Ok(())
+}
+
+fn select_interactive_action(
+    recommendations: &[StrategyRecommendation],
+) -> Result<Option<ActionId>, String> {
+    loop {
+        let categories: Vec<_> = ActionMenuCategory::ALL
+            .iter()
+            .copied()
+            .filter_map(|category| {
+                let options: Vec<_> = recommendations
+                    .iter()
+                    .filter(|recommendation| category.includes(recommendation.preview.id))
+                    .collect();
+                (!options.is_empty()).then_some((category, options))
+            })
+            .collect();
+
+        println!("可選行動分類（依目前陣營與預算篩選）：");
+        for (index, (category, options)) in categories.iter().enumerate() {
+            let top = &options[0];
+            println!(
+                "  {}) {}（{} 項；本類推薦：{}，預估支持 {:+.2}）",
+                index + 1,
+                category.label(),
+                options.len(),
+                top.preview.action_name,
+                top.preview.expected_support_delta
+            );
+        }
+        println!("  r) 直接執行全場策略推薦　q) 結束本場");
+        print!("選分類：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        let choice = input.trim();
+        if choice.eq_ignore_ascii_case("q") {
+            return Ok(None);
+        }
+        if choice.eq_ignore_ascii_case("r") {
+            return Ok(recommendations
+                .first()
+                .map(|recommendation| recommendation.preview.id));
+        }
+        let Ok(index) = choice.parse::<usize>() else {
+            println!("請輸入分類編號、r 或 q。\n");
+            continue;
+        };
+        let Some((category, options)) = categories.get(index.saturating_sub(1)) else {
+            println!("沒有這個分類。\n");
+            continue;
+        };
+
+        loop {
+            println!("\n【{}】", category.label());
+            for (option_index, recommendation) in options.iter().enumerate() {
+                let risk = if recommendation.preview.detection_probability > 0.0 {
+                    format!(
+                        "｜預估揭露 {:.0}%",
+                        recommendation.preview.detection_probability * 100.0
+                    )
+                } else {
+                    String::new()
+                };
+                let infrastructure = if recommendation.preview.infrastructure_delta > 0.0 {
+                    format!(
+                        "｜組織量能 +{:.0}",
+                        recommendation.preview.infrastructure_delta
+                    )
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  {}) [{}] {}｜預算 {}｜支持 {:+.2}｜信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}｜策略 {:.2}{}{}",
+                    option_index + 1,
+                    recommendation.preview.category.label(),
+                    recommendation.preview.action_name,
+                    recommendation.preview.cost,
+                    recommendation.preview.expected_support_delta,
+                    recommendation.preview.trust_delta,
+                    recommendation.preview.turnout_delta,
+                    recommendation.preview.stamina_delta,
+                    recommendation.score,
+                    risk,
+                    infrastructure
+                );
+            }
+            print!("選行動編號（b 返回分類，q 結束）：");
+            io::stdout().flush().map_err(|error| error.to_string())?;
+            input.clear();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(|error| error.to_string())?;
+            let selected = input.trim();
+            if selected.eq_ignore_ascii_case("b") {
+                break;
+            }
+            if selected.eq_ignore_ascii_case("q") {
+                return Ok(None);
+            }
+            let Ok(option_index) = selected.parse::<usize>() else {
+                println!("請輸入行動編號、b 或 q。\n");
+                continue;
+            };
+            if let Some(recommendation) = options.get(option_index.saturating_sub(1)) {
+                return Ok(Some(recommendation.preview.id));
+            }
+            println!("沒有這個行動。\n");
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -811,6 +974,12 @@ fn run_batch(
         options.seed,
         last_seed,
         runs
+    );
+    println!(
+        "難度：{}；事件包：{}；事件時序：{}。",
+        options.setup.difficulty.label(),
+        options.setup.event_pack.label(),
+        options.setup.timeline.label()
     );
     if let Some(party) = selected_party {
         println!("玩家政黨情境：{}。", party.name);
@@ -1361,6 +1530,9 @@ fn save_batch_log(
             .collect::<Vec<_>>()
             .join(";");
         cells.push(action_composition);
+        cells.push(options.setup.difficulty.key().to_string());
+        cells.push(options.setup.event_pack.key().to_string());
+        cells.push(options.setup.timeline.key().to_string());
         writeln!(file, "{}", cells.join("\t")).map_err(|error| error.to_string())?;
     }
     file.flush().map_err(|error| error.to_string())?;
@@ -1616,7 +1788,7 @@ fn save_campaign_log(
     let review = game.scorecard();
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
         game.campaign_year,
         if game.region.is_some() {
             "local"
@@ -1641,7 +1813,10 @@ fn save_campaign_log(
         review.resource_management,
         review.versatility,
         game.exposed_tactics,
-        game.sanctioned_funds
+        game.sanctioned_funds,
+        game.setup.difficulty.key(),
+        game.setup.event_pack.key(),
+        game.setup.timeline.key()
     )
     .map_err(|error| error.to_string())?;
     file.flush().map_err(|error| error.to_string())?;
@@ -1692,6 +1867,7 @@ fn print_usage() {
   project-twn --parties
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable|hardball]
+      [--difficulty story|standard|hard] [--event-pack all|democracy|cross-strait|local|media] [--timeline weekly|date]
       [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
   project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--strategy 策略]
       [--sweep-styles | --sweep-strategies | --sensitivity | --interaction-sensitivity]
@@ -1699,6 +1875,7 @@ fn print_usage() {
 
 範例：
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
+  cargo run -- --simulate 2024 --role challenger --difficulty story --event-pack democracy --timeline date
   cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --strategy issue --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sweep-strategies --batch-log strategy.tsv
@@ -1707,6 +1884,7 @@ fn print_usage() {
 
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
+難度可選故事／標準／挑戰；事件包可篩選民主化、兩岸、地方民生或媒體信任議題；--timeline date 會將有日期錨點的事件周年映射到 12 週戰役日曆，沒有錨點的週次留白。這是可切換的遊戲排程，不表示史實在遊戲年份重演。
 省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。
 --strategy 選擇七種權重組合，互動模式顯示行動分類、排序及預估揭露風險，--auto 依排序採取行動。
@@ -1718,6 +1896,32 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_menu_categories_partition_all_actions() {
+        let assignments: Vec<_> = ActionId::ALL
+            .iter()
+            .filter(|id| {
+                ActionMenuCategory::ALL
+                    .iter()
+                    .filter(|category| category.includes(**id))
+                    .count()
+                    == 1
+            })
+            .collect();
+        assert_eq!(assignments.len(), ActionId::COUNT);
+        let largest_group = ActionMenuCategory::ALL
+            .iter()
+            .map(|category| {
+                ActionId::ALL
+                    .iter()
+                    .filter(|id| category.includes(**id))
+                    .count()
+            })
+            .max()
+            .unwrap();
+        assert_eq!(largest_group, 8);
+    }
 
     #[test]
     fn percentile_uses_nearest_rank_and_handles_empty_data() {
