@@ -47,6 +47,17 @@ cargo run -- --parties
 
 歷史事件涵蓋解嚴後校園自治與黨政軍影響退場、野百合學運、廢止《動員戡亂時期臨時條款》、刑法第100條修正、首次和平政黨輪替、拉法葉艦採購爭議、林益世案、三一九槍擊案、紅衫軍、ECFA、陳雲林來台與警力維安爭議、洪仲丘事件、反媒體壟斷、太陽花、周子瑜遭貼政治標籤與道歉影片、反課綱、李新死因影片與羅淑蕾名譽訴訟、愛國同心會與異議人士衝突及其成員參選個案、柯文哲與彭文正相關司法程序，以及轉型正義、香港運動、反滲透法、同性婚姻、COVID-19、韓流、2024三黨不過半及2025罷免投票。人物及司法事件明確區分指控、起訴、程序裁定和確定判決；不把案件簡化成固定政黨加減分。年表、來源與模型限制見 [`docs/歷史與來源.md`](docs/歷史與來源.md)。
 
+## 參考專案
+
+- 台灣模擬選戰1994
+- 模擬總統大選1996
+- 2024+大總統
+- [鄉民政治學：總統風雲錄](https://ilovebibibird.github.io/PTTPolitics/)
+- [taiwanizer](https://github.com/Hans-Hanlin/taiwanizer)
+- [Taiwan.md](https://github.com/frank890417/taiwan-md)
+- [localization-tw](https://github.com/Qmo37/localization-tw)
+- [zhtw](https://github.com/rajatim/zhtw)
+
 ## 開發與測試
 
 ```powershell
