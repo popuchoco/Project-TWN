@@ -26,6 +26,8 @@ pub enum GameError {
     RequiresThreeCandidates,
     PollAlreadyTaken,
     CoalitionAlreadyUsed,
+    HeadquartersAlreadyEstablished,
+    SupportersAssociationAlreadyEstablished,
 }
 
 impl fmt::Display for GameError {
@@ -43,6 +45,12 @@ impl fmt::Display for GameError {
             }
             Self::PollAlreadyTaken => formatter.write_str("本週已完成民調協調；每週最多一次。"),
             Self::CoalitionAlreadyUsed => formatter.write_str("本週已進行跨黨協商；每週最多一次。"),
+            Self::HeadquartersAlreadyEstablished => {
+                formatter.write_str("競選總部已成立；每場戰役只能成立一次。")
+            }
+            Self::SupportersAssociationAlreadyEstablished => {
+                formatter.write_str("後援會已成立；每場戰役只能成立一次。")
+            }
         }
     }
 }
@@ -248,6 +256,73 @@ pub enum ActionId {
     PublicMessage,
     RestAndPrepare,
     PollCoordination,
+    CampaignHeadquarters,
+    VolunteerCanvassing,
+    GroundTeamLeaflets,
+    StreetSweep,
+    TurnoutMobilization,
+    Debate,
+    MediaInterview,
+    PolicyPresentation,
+    FactCheckResponse,
+    FabricatedPoll,
+    AnonymousSmear,
+    CoordinatedOpinionWar,
+    SupportersAssociation,
+    ReligiousCommunityVisit,
+    PilgrimageParticipation,
+    MassAttendance,
+    VulnerableCommunityCare,
+    DisasterResponseVisit,
+}
+
+impl ActionId {
+    pub const COUNT: usize = 30;
+
+    pub fn category(self) -> TacticCategory {
+        match self {
+            Self::FabricatedPoll | Self::AnonymousSmear | Self::CoordinatedOpinionWar => {
+                TacticCategory::Negative
+            }
+            Self::CoalitionTalks
+            | Self::PollCoordination
+            | Self::RestAndPrepare
+            | Self::Debate
+            | Self::MediaInterview
+            | Self::PolicyPresentation
+            | Self::FactCheckResponse
+            | Self::ReligiousCommunityVisit
+            | Self::PilgrimageParticipation
+            | Self::MassAttendance => TacticCategory::Neutral,
+            _ => TacticCategory::Positive,
+        }
+    }
+
+    fn base_exposure_risk(self) -> Option<f64> {
+        match self {
+            Self::FabricatedPoll => Some(0.24),
+            Self::AnonymousSmear => Some(0.32),
+            Self::CoordinatedOpinionWar => Some(0.20),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TacticCategory {
+    Positive,
+    Neutral,
+    Negative,
+}
+
+impl TacticCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Positive => "正面選戰",
+            Self::Neutral => "中立選戰",
+            Self::Negative => "負面／高風險選戰",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -266,19 +341,30 @@ const INCUMBENT_WEEKLY_OBJECTIVES: &[WeeklyObjective] = &[
             ActionId::PolicyDelivery,
             ActionId::CrisisResponse,
             ActionId::PublicServices,
+            ActionId::PolicyPresentation,
         ],
         target_actions: 2,
     },
     WeeklyObjective {
         title: "公開資訊與回應質疑",
         description: "透過施政檢討或公開政策問答完成兩項溝通行動。",
-        qualifying_actions: &[ActionId::TransparencyReport, ActionId::PublicMessage],
+        qualifying_actions: &[
+            ActionId::TransparencyReport,
+            ActionId::PublicMessage,
+            ActionId::MediaInterview,
+            ActionId::FactCheckResponse,
+        ],
         target_actions: 2,
     },
     WeeklyObjective {
         title: "穩定地方服務",
         description: "以民生服務或施政方案回應在地生活議題，完成兩項行動。",
-        qualifying_actions: &[ActionId::PublicServices, ActionId::PolicyDelivery],
+        qualifying_actions: &[
+            ActionId::PublicServices,
+            ActionId::PolicyDelivery,
+            ActionId::VulnerableCommunityCare,
+            ActionId::DisasterResponseVisit,
+        ],
         target_actions: 2,
     },
     WeeklyObjective {
@@ -293,19 +379,39 @@ const CHALLENGER_WEEKLY_OBJECTIVES: &[WeeklyObjective] = &[
     WeeklyObjective {
         title: "走入社區、擴大參與",
         description: "透過社區走訪或依法集會完成兩項公民參與行動。",
-        qualifying_actions: &[ActionId::CommunityTour, ActionId::LegalAssembly],
+        qualifying_actions: &[
+            ActionId::CommunityTour,
+            ActionId::LegalAssembly,
+            ActionId::VolunteerCanvassing,
+            ActionId::GroundTeamLeaflets,
+            ActionId::StreetSweep,
+            ActionId::TurnoutMobilization,
+            ActionId::ReligiousCommunityVisit,
+            ActionId::VulnerableCommunityCare,
+            ActionId::DisasterResponseVisit,
+        ],
         target_actions: 2,
     },
     WeeklyObjective {
         title: "提出可檢驗的替代方案",
         description: "以政見論壇或監督提案完成兩項政策論述行動。",
-        qualifying_actions: &[ActionId::PolicyForum, ActionId::OversightPetition],
+        qualifying_actions: &[
+            ActionId::PolicyForum,
+            ActionId::OversightPetition,
+            ActionId::PolicyPresentation,
+            ActionId::Debate,
+        ],
         target_actions: 2,
     },
     WeeklyObjective {
         title: "建立可信的監督與說明",
         description: "用監督提案或公開政策問答完成兩項溝通行動。",
-        qualifying_actions: &[ActionId::OversightPetition, ActionId::PublicMessage],
+        qualifying_actions: &[
+            ActionId::OversightPetition,
+            ActionId::PublicMessage,
+            ActionId::FactCheckResponse,
+            ActionId::MediaInterview,
+        ],
         target_actions: 2,
     },
     WeeklyObjective {
@@ -533,11 +639,250 @@ const CHALLENGER_ACTIONS: &[ActionSpec] = &[
     },
 ];
 
+const COMMON_CAMPAIGN_ACTIONS: &[ActionSpec] = &[
+    ActionSpec {
+        id: ActionId::CampaignHeadquarters,
+        name: "成立競選總部與志工調度",
+        description: "投入場地與人力建立一次性組織基礎，後續地面行動可受益。",
+        cost: 8,
+        base_swing: 0.0,
+        trust_delta: 0.05,
+        turnout_delta: 0.08,
+        issues: &[Issue::Governance, Issue::Civic, Issue::Local],
+        stamina_cost: 0.5,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::VolunteerCanvassing,
+        name: "志工組織與逐戶拜票",
+        description: "組織志工接觸社區、聆聽需求並回報地方議題。",
+        cost: 2,
+        base_swing: 0.26,
+        trust_delta: 0.20,
+        turnout_delta: 0.18,
+        issues: &[Issue::Local, Issue::Rights, Issue::Education],
+        stamina_cost: 1.3,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::GroundTeamLeaflets,
+        name: "地面競選人員掃街與發文宣",
+        description: "以公開競選人力進行街頭接觸與政見文宣發放。",
+        cost: 3,
+        base_swing: 0.22,
+        trust_delta: 0.12,
+        turnout_delta: 0.18,
+        issues: &[Issue::Local, Issue::Civic, Issue::Media],
+        stamina_cost: 1.7,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::StreetSweep,
+        name: "候選人掃街與市場拜訪",
+        description: "以公開行程接觸居民、商家與地方社群。",
+        cost: 2,
+        base_swing: 0.26,
+        trust_delta: 0.18,
+        turnout_delta: 0.21,
+        issues: &[Issue::Local, Issue::Civic, Issue::Trust],
+        stamina_cost: 1.7,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::TurnoutMobilization,
+        name: "支持者動員與投票提醒",
+        description: "整合公開志工與支持者聯繫，提升投票參與動能。",
+        cost: 3,
+        base_swing: 0.15,
+        trust_delta: 0.02,
+        turnout_delta: 0.48,
+        issues: &[Issue::Civic, Issue::Rights],
+        stamina_cost: 1.2,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::Debate,
+        name: "電視辯論與政策攻防",
+        description: "在公開辯論中比較方案、回應質疑並接受檢驗。",
+        cost: 1,
+        base_swing: 0.18,
+        trust_delta: 0.22,
+        turnout_delta: 0.06,
+        issues: &[Issue::Economy, Issue::Governance, Issue::CrossStrait],
+        stamina_cost: 1.1,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::MediaInterview,
+        name: "媒體專訪",
+        description: "接受採訪說明立場、回答追問並釐清爭議。",
+        cost: 0,
+        base_swing: 0.12,
+        trust_delta: 0.18,
+        turnout_delta: 0.03,
+        issues: &[Issue::Media, Issue::Trust],
+        stamina_cost: 0.5,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::PolicyPresentation,
+        name: "政見發表會",
+        description: "公開提出可檢驗的政策主張、執行期程與資源安排。",
+        cost: 2,
+        base_swing: 0.29,
+        trust_delta: 0.25,
+        turnout_delta: 0.06,
+        issues: &[
+            Issue::Economy,
+            Issue::Governance,
+            Issue::PublicHealth,
+            Issue::Local,
+        ],
+        stamina_cost: 1.2,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::FactCheckResponse,
+        name: "查證與公開澄清",
+        description: "公布可核對資料、說明不確定處並回應錯誤訊息。",
+        cost: 1,
+        base_swing: 0.14,
+        trust_delta: 0.25,
+        turnout_delta: 0.05,
+        issues: &[Issue::Media, Issue::Trust, Issue::Governance],
+        stamina_cost: 0.7,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::FabricatedPoll,
+        name: "造假民調／誤導性數字操作",
+        description: "短期聲量可能增加，但有被查證揭露、信任受損與罰款風險。",
+        cost: 1,
+        base_swing: 0.38,
+        trust_delta: 0.0,
+        turnout_delta: 0.03,
+        issues: &[Issue::Trust, Issue::Media],
+        stamina_cost: 0.4,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::AnonymousSmear,
+        name: "匿名黑函／未查證指控",
+        description: "短期可能轉移議題焦點；查證後將觸發較重的信任與資源懲處。",
+        cost: 1,
+        base_swing: 0.42,
+        trust_delta: -0.02,
+        turnout_delta: 0.01,
+        issues: &[Issue::Governance, Issue::Trust, Issue::Media],
+        stamina_cost: 0.5,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::CoordinatedOpinionWar,
+        name: "協調式網路輿論操作",
+        description: "高風險聲量操作；遭揭露時會受到支持度、信任與預算懲處。",
+        cost: 2,
+        base_swing: 0.33,
+        trust_delta: -0.04,
+        turnout_delta: 0.12,
+        issues: &[Issue::Civic, Issue::Media, Issue::Trust],
+        stamina_cost: 0.8,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::SupportersAssociation,
+        name: "成立後援會與地方聯絡網",
+        description: "建立公開、可問責的支持者組織，增加後續地面行動的調度量能。",
+        cost: 5,
+        base_swing: 0.0,
+        trust_delta: 0.08,
+        turnout_delta: 0.06,
+        issues: &[Issue::Local, Issue::Civic, Issue::Governance],
+        stamina_cost: 0.6,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::ReligiousCommunityVisit,
+        name: "拜訪宗教團體與在地社群",
+        description: "公開聆聽團體關注，不以信仰身分推定政治立場或支持。",
+        cost: 1,
+        base_swing: 0.12,
+        trust_delta: 0.14,
+        turnout_delta: 0.05,
+        issues: &[Issue::Local, Issue::Civic, Issue::Trust],
+        stamina_cost: 0.8,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::PilgrimageParticipation,
+        name: "參與公開遶境行程",
+        description: "以尊重儀式與地方自治的方式參與公開活動，效果依情境而異。",
+        cost: 1,
+        base_swing: 0.10,
+        trust_delta: 0.12,
+        turnout_delta: 0.06,
+        issues: &[Issue::Local, Issue::Civic],
+        stamina_cost: 1.0,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::MassAttendance,
+        name: "出席公開彌撒或宗教活動",
+        description: "以公開且尊重信仰自主的方式出席，不預設信眾政治傾向。",
+        cost: 0,
+        base_swing: 0.08,
+        trust_delta: 0.10,
+        turnout_delta: 0.04,
+        issues: &[Issue::Local, Issue::Civic, Issue::Trust],
+        stamina_cost: 0.7,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::VulnerableCommunityCare,
+        name: "關懷弱勢與社區服務",
+        description: "投入可持續的社區服務並連結公共資源，不以單次曝光取代政策。",
+        cost: 3,
+        base_swing: 0.24,
+        trust_delta: 0.23,
+        turnout_delta: 0.10,
+        issues: &[Issue::PublicHealth, Issue::Local, Issue::Rights],
+        stamina_cost: 1.1,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::DisasterResponseVisit,
+        name: "勘災與災後關懷",
+        description: "掌握受災需求、協調救助資訊並追蹤後續；議題契合時較能回應民眾關切。",
+        cost: 4,
+        base_swing: 0.16,
+        trust_delta: 0.30,
+        turnout_delta: 0.08,
+        issues: &[Issue::PublicHealth, Issue::Local, Issue::Governance],
+        stamina_cost: 1.2,
+        stamina_recovery: 0.0,
+    },
+];
+
 pub fn actions_for(side: Side) -> &'static [ActionSpec] {
     match side {
         Side::Incumbent => INCUMBENT_ACTIONS,
         Side::Challenger => CHALLENGER_ACTIONS,
     }
+}
+
+/// All currently available operations for a side, including shared campaign tactics.
+pub fn campaign_actions_for(side: Side) -> Vec<ActionSpec> {
+    let mut actions = actions_for(side).to_vec();
+    actions.extend_from_slice(COMMON_CAMPAIGN_ACTIONS);
+    actions
+}
+
+fn find_campaign_action(side: Side, id: ActionId) -> Option<ActionSpec> {
+    actions_for(side)
+        .iter()
+        .chain(COMMON_CAMPAIGN_ACTIONS)
+        .find(|action| action.id == id)
+        .copied()
 }
 
 #[derive(Clone, Debug)]
@@ -561,6 +906,11 @@ pub struct GameState {
     pub polls: Vec<f64>,
     pub voter_segments: Vec<VoterSegmentPoll>,
     pub budget: i32,
+    pub headquarters_established: bool,
+    pub supporters_association_established: bool,
+    pub field_capacity: f64,
+    pub exposed_tactics: u8,
+    pub sanctioned_funds: i32,
     pub trust: f64,
     pub turnout_momentum: f64,
     pub stamina: f64,
@@ -574,7 +924,7 @@ pub struct GameState {
     weekly_objective_progress: u8,
     weekly_objective_completed: bool,
     objectives_completed: u8,
-    action_uses: [u8; 12],
+    action_uses: [u8; ActionId::COUNT],
     matched_events: u8,
     pub poll_taken_this_week: bool,
     pub coalition_this_week: bool,
@@ -585,10 +935,18 @@ pub struct GameState {
 #[derive(Clone, Debug)]
 pub struct ActionOutcome {
     pub action_name: &'static str,
+    pub category: TacticCategory,
     pub event_title: Option<&'static str>,
     pub share_before: f64,
     pub share_after: f64,
     pub expected_support_delta: f64,
+    pub detection_probability: f64,
+    pub negative_tactic_detected: bool,
+    pub sanction_fine: i32,
+    pub exposed_tactics: u8,
+    pub sanctioned_funds: i32,
+    pub field_capacity_after: f64,
+    pub tactic_note: Option<String>,
     pub trust_after: f64,
     pub turnout_after: f64,
     pub stamina_after: f64,
@@ -611,11 +969,15 @@ pub struct ActionOutcome {
 pub struct ActionPreview {
     pub id: ActionId,
     pub action_name: &'static str,
+    pub category: TacticCategory,
     pub expected_swing: f64,
     pub direct_support_delta: f64,
     pub coordination_support_delta: f64,
     pub expected_response_delta: f64,
     pub expected_support_delta: f64,
+    pub detection_probability: f64,
+    pub expected_sanction_fine: f64,
+    pub infrastructure_delta: f64,
     pub event_match: bool,
     pub local_match: bool,
     pub objective_match: bool,
@@ -845,6 +1207,11 @@ impl GameState {
             polls,
             voter_segments,
             budget: 100,
+            headquarters_established: false,
+            supporters_association_established: false,
+            field_capacity: 0.0,
+            exposed_tactics: 0,
+            sanctioned_funds: 0,
             trust,
             turnout_momentum,
             stamina: 100.0,
@@ -856,7 +1223,7 @@ impl GameState {
             weekly_objective_progress: 0,
             weekly_objective_completed: false,
             objectives_completed: 0,
-            action_uses: [0; 12],
+            action_uses: [0; ActionId::COUNT],
             matched_events: 0,
             poll_taken_this_week: false,
             coalition_this_week: false,
@@ -886,11 +1253,7 @@ impl GameState {
         if self.round >= CAMPAIGN_ROUNDS {
             return Err(GameError::CampaignComplete);
         }
-        let action = actions_for(self.side)
-            .iter()
-            .find(|action| action.id == id)
-            .copied()
-            .ok_or(GameError::ActionUnavailable)?;
+        let action = find_campaign_action(self.side, id).ok_or(GameError::ActionUnavailable)?;
         if self.budget < action.cost {
             return Err(GameError::InsufficientBudget {
                 required: action.cost,
@@ -908,6 +1271,12 @@ impl GameState {
         }
         if id == ActionId::CoalitionTalks && self.coalition_this_week {
             return Err(GameError::CoalitionAlreadyUsed);
+        }
+        if id == ActionId::CampaignHeadquarters && self.headquarters_established {
+            return Err(GameError::HeadquartersAlreadyEstablished);
+        }
+        if id == ActionId::SupportersAssociation && self.supporters_association_established {
+            return Err(GameError::SupportersAssociationAlreadyEstablished);
         }
         Ok(action)
     }
@@ -932,6 +1301,12 @@ impl GameState {
                     && self.weekly_objective_progress < objective.target_actions
             });
         let expected_swing = self.expected_action_swing(action).clamp(-0.2, 0.55);
+        let detection_probability = self.detection_probability(action.id);
+        let expected_sanction_fine = detection_probability
+            * self
+                .sanction_schedule()
+                .min(self.budget.saturating_sub(action.cost)) as f64;
+        let infrastructure_delta = self.infrastructure_gain(action.id);
         let mut projected_polls = self.polls.clone();
         let mut projected_segments = self.voter_segments.clone();
         if expected_swing.abs() > f64::EPSILON {
@@ -981,6 +1356,16 @@ impl GameState {
         let after_coordination = projected_polls[self.player_index];
         let coordination_support_delta = after_coordination - (before + direct_support_delta);
 
+        if detection_probability > 0.0 {
+            apply_segment_swing_to_state(
+                &mut projected_polls,
+                &mut projected_segments,
+                self.player_index,
+                -1.6 * detection_probability,
+                action.issues,
+            );
+        }
+
         if action.id != ActionId::RestAndPrepare {
             if let Some(rival_index) = strongest_rival_index(&projected_polls, self.player_index) {
                 apply_segment_swing_to_state(
@@ -994,19 +1379,31 @@ impl GameState {
         }
         let expected_support_after = projected_polls[self.player_index];
         let expected_response_delta = expected_support_after - after_coordination;
-        let trust_after = (self.trust + action.trust_delta).clamp(0.0, 100.0);
-        let turnout_after = (self.turnout_momentum + action.turnout_delta).clamp(0.0, 100.0);
+        let trust_after =
+            (self.trust + action.trust_delta - 16.0 * detection_probability).clamp(0.0, 100.0);
+        let field_turnout = if is_field_action(action.id) {
+            self.field_capacity * 0.0015
+        } else {
+            0.0
+        };
+        let turnout_after = (self.turnout_momentum + action.turnout_delta + field_turnout
+            - 0.16 * detection_probability)
+            .clamp(0.0, 100.0);
         let stamina_after =
             (self.stamina - action.stamina_cost + action.stamina_recovery).clamp(0.0, 100.0);
 
         ActionPreview {
             id: action.id,
             action_name: action.name,
+            category: action.id.category(),
             expected_swing,
             direct_support_delta,
             coordination_support_delta,
             expected_response_delta,
             expected_support_delta: expected_support_after - before,
+            detection_probability,
+            expected_sanction_fine,
+            infrastructure_delta,
             event_match,
             local_match,
             objective_match,
@@ -1060,6 +1457,11 @@ impl GameState {
             * self
                 .model_parameters
                 .multiplier(SensitivityParameter::FatiguePenalty);
+        let infrastructure_bonus = if is_field_action(action.id) {
+            self.field_capacity * 0.0025
+        } else {
+            0.0
+        };
         action.base_swing
             * self
                 .model_parameters
@@ -1069,6 +1471,28 @@ impl GameState {
             + trust_bonus
             + skill_bonus
             + fatigue_penalty
+            + infrastructure_bonus
+    }
+
+    fn detection_probability(&self, id: ActionId) -> f64 {
+        let Some(base_risk) = id.base_exposure_risk() else {
+            return 0.0;
+        };
+        let repeated_use = f64::from(self.action_uses[action_index(id)].min(4)) * 0.10;
+        let previous_exposures = f64::from(self.exposed_tactics) * 0.08;
+        (base_risk + repeated_use + previous_exposures).clamp(0.05, 0.90)
+    }
+
+    fn sanction_schedule(&self) -> i32 {
+        (5 + i32::from(self.exposed_tactics) * 2).min(15)
+    }
+
+    fn infrastructure_gain(&self, id: ActionId) -> f64 {
+        match id {
+            ActionId::CampaignHeadquarters => 35.0,
+            ActionId::SupportersAssociation => 20.0,
+            _ => 0.0,
+        }
     }
 
     pub fn objectives_completed(&self) -> u8 {
@@ -1154,6 +1578,28 @@ impl GameState {
             self.coalition_this_week = true;
         }
 
+        let mut negative_tactic_detected = false;
+        let mut sanction_fine = 0;
+        let tactic_note = if preview.detection_probability > 0.0 {
+            negative_tactic_detected = self.rng.unit() < preview.detection_probability;
+            if negative_tactic_detected {
+                let scheduled_fine = self.sanction_schedule().min(self.budget);
+                self.exposed_tactics = self.exposed_tactics.saturating_add(1);
+                sanction_fine = scheduled_fine;
+                self.budget -= sanction_fine;
+                self.sanctioned_funds = self.sanctioned_funds.saturating_add(sanction_fine);
+                self.apply_segment_swing(self.player_index, -1.6, action.issues);
+                Some(format!(
+                    "查核揭露此項負面操作：信任與支持受損，另遭遊戲內資源懲處 {}（累計 {}）。",
+                    sanction_fine, self.sanctioned_funds
+                ))
+            } else {
+                Some("本次未被查核揭露；後續重複操作會提高風險。".to_string())
+            }
+        } else {
+            None
+        };
+
         // A competing campaign responds to daily activity with a small seeded
         // movement; this is a model parameter, not a historical vote estimate.
         if id != ActionId::RestAndPrepare {
@@ -1163,8 +1609,24 @@ impl GameState {
             }
         }
 
-        self.trust = (self.trust + action.trust_delta).clamp(0.0, 100.0);
-        self.turnout_momentum = (self.turnout_momentum + action.turnout_delta).clamp(0.0, 100.0);
+        let sanction_trust_penalty = if negative_tactic_detected { 16.0 } else { 0.0 };
+        let sanction_turnout_penalty = if negative_tactic_detected { 0.16 } else { 0.0 };
+        self.trust = (self.trust + action.trust_delta - sanction_trust_penalty).clamp(0.0, 100.0);
+        let field_turnout = if is_field_action(id) {
+            self.field_capacity * 0.0015
+        } else {
+            0.0
+        };
+        self.turnout_momentum = (self.turnout_momentum + action.turnout_delta + field_turnout
+            - sanction_turnout_penalty)
+            .clamp(0.0, 100.0);
+        self.field_capacity = (self.field_capacity + preview.infrastructure_delta).min(60.0);
+        if id == ActionId::CampaignHeadquarters {
+            self.headquarters_established = true;
+        }
+        if id == ActionId::SupportersAssociation {
+            self.supporters_association_established = true;
+        }
         self.stamina =
             (self.stamina - action.stamina_cost + action.stamina_recovery).clamp(0.0, 100.0);
         self.action_uses[action_index(id)] = self.action_uses[action_index(id)].saturating_add(1);
@@ -1209,10 +1671,18 @@ impl GameState {
 
         Ok(ActionOutcome {
             action_name: action.name,
+            category: id.category(),
             event_title,
             share_before,
             share_after: self.polls[self.player_index],
             expected_support_delta: preview.expected_support_delta,
+            detection_probability: preview.detection_probability,
+            negative_tactic_detected,
+            sanction_fine,
+            exposed_tactics: self.exposed_tactics,
+            sanctioned_funds: self.sanctioned_funds,
+            field_capacity_after: self.field_capacity,
+            tactic_note,
             trust_after: self.trust,
             turnout_after: self.turnout_momentum,
             stamina_after: self.stamina,
@@ -1358,6 +1828,30 @@ impl GameState {
         if !(0..=MAX_BUDGET).contains(&self.budget) {
             return Err("budget must remain within the configured bounds");
         }
+        let expected_field_capacity = f64::from(self.headquarters_established) * 35.0
+            + f64::from(self.supporters_association_established) * 20.0;
+        if !self.field_capacity.is_finite()
+            || !(0.0..=55.0).contains(&self.field_capacity)
+            || (self.field_capacity - expected_field_capacity).abs() > f64::EPSILON
+        {
+            return Err("field capacity must match established campaign infrastructure");
+        }
+        if self.sanctioned_funds < 0 || self.exposed_tactics > CAMPAIGN_ROUNDS * DAYS_PER_WEEK {
+            return Err(
+                "sanction totals and exposed tactic counts must remain non-negative and bounded",
+            );
+        }
+        let negative_action_count = [
+            ActionId::FabricatedPoll,
+            ActionId::AnonymousSmear,
+            ActionId::CoordinatedOpinionWar,
+        ]
+        .iter()
+        .map(|id| self.action_uses[action_index(*id)])
+        .fold(0_u8, u8::saturating_add);
+        if self.exposed_tactics > negative_action_count {
+            return Err("exposed tactics cannot exceed the number of negative tactics used");
+        }
         if ![self.trust, self.turnout_momentum, self.stamina]
             .iter()
             .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
@@ -1383,7 +1877,7 @@ impl GameState {
                     || objective
                         .qualifying_actions
                         .iter()
-                        .any(|id| !actions_for(self.side).iter().any(|action| action.id == *id))
+                        .any(|id| find_campaign_action(self.side, *id).is_none())
             })
         {
             return Err("each campaign week must have a valid objective");
@@ -1565,18 +2059,36 @@ fn weakest_rival_index(polls: &[f64], player_index: usize) -> Option<usize> {
 
 fn action_skill(attributes: CandidateAttributes, id: ActionId) -> f64 {
     match id {
-        ActionId::PolicyDelivery | ActionId::CrisisResponse | ActionId::PolicyForum => {
-            attributes.policy
-        }
+        ActionId::PolicyDelivery
+        | ActionId::CrisisResponse
+        | ActionId::PolicyForum
+        | ActionId::Debate
+        | ActionId::PolicyPresentation => attributes.policy,
         ActionId::CommunityTour
         | ActionId::PublicServices
         | ActionId::LegalAssembly
-        | ActionId::CoalitionTalks => attributes.organization,
+        | ActionId::CoalitionTalks
+        | ActionId::CampaignHeadquarters
+        | ActionId::VolunteerCanvassing
+        | ActionId::GroundTeamLeaflets
+        | ActionId::StreetSweep
+        | ActionId::TurnoutMobilization
+        | ActionId::SupportersAssociation
+        | ActionId::ReligiousCommunityVisit
+        | ActionId::PilgrimageParticipation
+        | ActionId::MassAttendance
+        | ActionId::VulnerableCommunityCare
+        | ActionId::DisasterResponseVisit => attributes.organization,
         ActionId::TransparencyReport
         | ActionId::OversightPetition
         | ActionId::PublicMessage
         | ActionId::RestAndPrepare
-        | ActionId::PollCoordination => attributes.communication,
+        | ActionId::PollCoordination
+        | ActionId::MediaInterview
+        | ActionId::FactCheckResponse
+        | ActionId::FabricatedPoll
+        | ActionId::AnonymousSmear
+        | ActionId::CoordinatedOpinionWar => attributes.communication,
     }
 }
 
@@ -1672,7 +2184,35 @@ fn action_index(id: ActionId) -> usize {
         ActionId::PublicMessage => 9,
         ActionId::RestAndPrepare => 10,
         ActionId::PollCoordination => 11,
+        ActionId::CampaignHeadquarters => 12,
+        ActionId::VolunteerCanvassing => 13,
+        ActionId::GroundTeamLeaflets => 14,
+        ActionId::StreetSweep => 15,
+        ActionId::TurnoutMobilization => 16,
+        ActionId::Debate => 17,
+        ActionId::MediaInterview => 18,
+        ActionId::PolicyPresentation => 19,
+        ActionId::FactCheckResponse => 20,
+        ActionId::FabricatedPoll => 21,
+        ActionId::AnonymousSmear => 22,
+        ActionId::CoordinatedOpinionWar => 23,
+        ActionId::SupportersAssociation => 24,
+        ActionId::ReligiousCommunityVisit => 25,
+        ActionId::PilgrimageParticipation => 26,
+        ActionId::MassAttendance => 27,
+        ActionId::VulnerableCommunityCare => 28,
+        ActionId::DisasterResponseVisit => 29,
     }
+}
+
+fn is_field_action(id: ActionId) -> bool {
+    matches!(
+        id,
+        ActionId::VolunteerCanvassing
+            | ActionId::GroundTeamLeaflets
+            | ActionId::StreetSweep
+            | ActionId::TurnoutMobilization
+    )
 }
 
 fn local_slate(region: &RegionProfile) -> ([&'static str; 3], [f64; 3]) {
@@ -2078,5 +2618,78 @@ mod tests {
                 |segment| (segment.polls[game.player_index] - game.polls[game.player_index]).abs()
                     > 0.01
             ));
+    }
+
+    #[test]
+    fn headquarters_and_supporters_association_build_one_time_field_capacity() {
+        let mut game = GameState::new(2024, Side::Challenger, 901);
+        let headquarters = game.apply_action(ActionId::CampaignHeadquarters).unwrap();
+        assert_eq!(headquarters.field_capacity_after, 35.0);
+        assert!(matches!(
+            game.apply_action(ActionId::CampaignHeadquarters),
+            Err(GameError::HeadquartersAlreadyEstablished)
+        ));
+
+        let association = game.apply_action(ActionId::SupportersAssociation).unwrap();
+        assert_eq!(association.field_capacity_after, 55.0);
+        assert!(game.supporters_association_established);
+        assert!(matches!(
+            game.apply_action(ActionId::SupportersAssociation),
+            Err(GameError::SupportersAssociationAlreadyEstablished)
+        ));
+        assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn field_capacity_improves_ground_actions_and_religious_events_are_neutral() {
+        let baseline = GameState::new(2024, Side::Challenger, 902);
+        let base_swing = baseline
+            .preview_action(ActionId::StreetSweep)
+            .unwrap()
+            .expected_swing;
+        let mut organized = baseline.clone();
+        organized.field_capacity = 55.0;
+        let organized_swing = organized
+            .preview_action(ActionId::StreetSweep)
+            .unwrap()
+            .expected_swing;
+        assert!((organized_swing - base_swing - 0.1375).abs() < 0.0001);
+
+        for id in [
+            ActionId::ReligiousCommunityVisit,
+            ActionId::PilgrimageParticipation,
+            ActionId::MassAttendance,
+        ] {
+            assert_eq!(id.category(), TacticCategory::Neutral);
+        }
+    }
+
+    #[test]
+    fn negative_tactics_show_risk_and_exposure_triggers_sanctions() {
+        let mut one_attempt = GameState::new(2024, Side::Challenger, 903);
+        let initial = one_attempt
+            .preview_action(ActionId::FabricatedPoll)
+            .unwrap();
+        assert_eq!(initial.category, TacticCategory::Negative);
+        assert!(initial.detection_probability > 0.0);
+        assert!(initial.expected_sanction_fine > 0.0);
+        one_attempt.apply_action(ActionId::FabricatedPoll).unwrap();
+        let repeated = one_attempt
+            .preview_action(ActionId::FabricatedPoll)
+            .unwrap();
+        assert!(repeated.detection_probability > initial.detection_probability);
+
+        let caught = (0..100)
+            .find_map(|seed| {
+                let mut game = GameState::new(2024, Side::Challenger, seed);
+                let outcome = game.apply_action(ActionId::AnonymousSmear).unwrap();
+                outcome.negative_tactic_detected.then_some((game, outcome))
+            })
+            .expect("a broad deterministic seed range should include an exposed tactic");
+        assert_eq!(caught.0.exposed_tactics, 1);
+        assert!(caught.1.sanction_fine > 0);
+        assert_eq!(caught.0.sanctioned_funds, caught.1.sanction_fine);
+        assert!(caught.1.tactic_note.is_some());
+        assert!(caught.0.validate().is_ok());
     }
 }

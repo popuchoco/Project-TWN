@@ -4,8 +4,8 @@ use project_twn::history::{
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    actions_for, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState, ModelParameters,
-    SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+    campaign_actions_for, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
+    ModelParameters, SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
 use project_twn::strategy::{StrategyEngine, StrategyProfile};
 use std::collections::HashMap;
@@ -14,8 +14,8 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
-const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\tsensitivity_parameter_2\tmultiplier_2";
+const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2";
 const MAX_BATCH_RUNS: u32 = 10_000;
 const MAX_STRATEGY_SWEEP_RUNS: u32 = 1_000;
 const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
@@ -521,6 +521,22 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
             "剩餘預算：{}　信任：{:.1}　動員：{:.1}　體力：{:.1}",
             game.budget, game.trust, game.turnout_momentum, game.stamina
         );
+        println!(
+            "競選組織：總部 {}｜後援會 {}｜地面調度量能 {:.0}/55｜查核揭露 {} 次、累計懲處資源 {}",
+            if game.headquarters_established {
+                "已成立"
+            } else {
+                "未成立"
+            },
+            if game.supporters_association_established {
+                "已成立"
+            } else {
+                "未成立"
+            },
+            game.field_capacity,
+            game.exposed_tactics,
+            game.sanctioned_funds
+        );
         if let Some(event) = game.current_event() {
             println!("議題焦點：{} — {}", event.title, event.description);
         }
@@ -535,19 +551,39 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
             );
         }
         let recommendations = engine.rank_actions(game);
+        let available_actions = campaign_actions_for(game.side);
         for (index, recommendation) in recommendations.iter().enumerate() {
-            let action = actions_for(game.side)
+            let action = available_actions
                 .iter()
                 .find(|action| action.id == recommendation.preview.id)
+                .copied()
                 .ok_or_else(|| "策略引擎回傳了不適用的行動。".to_string())?;
             let rationale = if recommendation.rationales.is_empty() {
                 "符合目前整體盤勢".to_string()
             } else {
                 recommendation.rationales.join("、")
             };
+            let risk = if recommendation.preview.detection_probability > 0.0 {
+                format!(
+                    "｜預估揭露 {:.0}%／期望懲處資源 {:.2}",
+                    recommendation.preview.detection_probability * 100.0,
+                    recommendation.preview.expected_sanction_fine
+                )
+            } else {
+                String::new()
+            };
+            let infrastructure = if recommendation.preview.infrastructure_delta > 0.0 {
+                format!(
+                    "｜組織量能 +{:.0}",
+                    recommendation.preview.infrastructure_delta
+                )
+            } else {
+                String::new()
+            };
             println!(
-                "  {}) {}（預算 {}）— 預估支持度 {:+.2} 點〔直接 {:+.2}／整合 {:+.2}／對手平均回應 {:+.2}〕、信任 {:+.2}、動員 {:+.2}、體力 {:+.2}｜策略分 {:.2}｜{}｜{}",
+                "  {}) [{}] {}（預算 {}）— 預估支持度 {:+.2} 點〔直接 {:+.2}／整合 {:+.2}／對手平均回應 {:+.2}〕、信任 {:+.2}、動員 {:+.2}、體力 {:+.2}｜策略分 {:.2}｜{}{}{}｜{}",
                 index + 1,
+                recommendation.preview.category.label(),
                 action.name,
                 recommendation.preview.cost,
                 recommendation.preview.expected_support_delta,
@@ -559,6 +595,8 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
                 recommendation.preview.stamina_delta,
                 recommendation.score,
                 rationale,
+                risk,
+                infrastructure,
                 action.description,
             );
         }
@@ -623,6 +661,8 @@ struct BatchRecord {
     signed_margin: f64,
     objectives_completed: u8,
     budget_remaining: i32,
+    exposed_tactics: u8,
+    sanctioned_funds: i32,
     trust: f64,
     mobilization: f64,
     scorecard: CampaignScorecard,
@@ -643,6 +683,8 @@ struct BatchMetrics {
     mean_final_share: f64,
     mean_signed_margin: f64,
     mean_objectives: f64,
+    mean_exposed_tactics: f64,
+    mean_sanctioned_funds: f64,
     shares: Vec<f64>,
 }
 
@@ -785,6 +827,8 @@ fn simulate_batch_record(
         signed_margin: player_final_share - strongest_opponent_share,
         objectives_completed: game.objectives_completed(),
         budget_remaining: game.budget,
+        exposed_tactics: game.exposed_tactics,
+        sanctioned_funds: game.sanctioned_funds,
         trust: game.trust,
         mobilization: game.turnout_momentum,
         scorecard: game.scorecard(),
@@ -1095,13 +1139,23 @@ fn batch_metrics(group: &[&BatchRecord]) -> BatchMetrics {
             .map(|record| f64::from(record.objectives_completed))
             .sum::<f64>()
             / count,
+        mean_exposed_tactics: group
+            .iter()
+            .map(|record| f64::from(record.exposed_tactics))
+            .sum::<f64>()
+            / count,
+        mean_sanctioned_funds: group
+            .iter()
+            .map(|record| f64::from(record.sanctioned_funds))
+            .sum::<f64>()
+            / count,
         shares,
     }
 }
 
 fn print_batch_metrics(label: &str, metrics: &BatchMetrics) {
     println!(
-        "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜平均週任務 {:.1}/{}",
+        "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜平均週任務 {:.1}/{}｜揭露操作 {:.2} 次／平均懲處資源 {:.2}",
         label,
         metrics.seed_win_rate * 100.0,
         metrics.mean_model_probability * 100.0,
@@ -1111,7 +1165,9 @@ fn print_batch_metrics(label: &str, metrics: &BatchMetrics) {
         percentile(&metrics.shares, 0.90),
         metrics.mean_signed_margin,
         metrics.mean_objectives,
-        CAMPAIGN_ROUNDS
+        CAMPAIGN_ROUNDS,
+        metrics.mean_exposed_tactics,
+        metrics.mean_sanctioned_funds
     );
 }
 
@@ -1166,7 +1222,7 @@ fn save_batch_log(
         let review = record.scorecard;
         writeln!(
             file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{:.2}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{:.2}",
             options.year,
             mode,
             tsv_cell(region_name),
@@ -1191,6 +1247,8 @@ fn save_batch_log(
             review.event_response,
             review.resource_management,
             review.versatility,
+            record.exposed_tactics,
+            record.sanctioned_funds,
             record.sensitivity_parameter_2,
             record.multiplier_2
         )
@@ -1206,9 +1264,10 @@ fn tsv_cell(value: &str) -> String {
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
     println!(
-        "✓ 第 {} 週・第 {} 天 {}：玩家支持 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
+        "✓ 第 {} 週・第 {} 天 [{}] {}：玩家支持 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
         outcome.week,
         outcome.day,
+        outcome.category.label(),
         outcome.action_name,
         outcome.share_before,
         outcome.share_after,
@@ -1224,6 +1283,12 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
     if let Some(note) = &outcome.coordination_note {
         println!("  {note}");
     }
+    if let Some(note) = &outcome.tactic_note {
+        println!(
+            "  {note}（本次行動預估揭露率 {:.0}%）",
+            outcome.detection_probability * 100.0
+        );
+    }
     if let Some(title) = outcome.objective_title {
         let completion = if outcome.objective_completed && outcome.objective_reward > 0 {
             format!("；達成，預算獎勵 +{}", outcome.objective_reward)
@@ -1238,8 +1303,11 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
         );
     }
     println!(
-        "  信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100",
-        outcome.trust_after, outcome.turnout_after, outcome.stamina_after
+        "  信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100；地面調度量能 {:.0}/55",
+        outcome.trust_after,
+        outcome.turnout_after,
+        outcome.stamina_after,
+        outcome.field_capacity_after
     );
     if outcome.day == DAYS_PER_WEEK {
         print_poll_table(game);
@@ -1271,6 +1339,10 @@ fn print_final(game: &mut GameState) -> ElectionOutcome {
         "每週任務達成：{}/{}",
         game.objectives_completed(),
         CAMPAIGN_ROUNDS
+    );
+    println!(
+        "選戰誠信紀錄：遭查核揭露 {} 次、累計懲處資源 {}；終局地面調度量能 {:.0}/55。",
+        game.exposed_tactics, game.sanctioned_funds, game.field_capacity
     );
     println!("=== 戰役操作評分（0–100；非遊戲品質評測）===");
     for (axis, score) in game.scorecard().axes() {
@@ -1435,7 +1507,7 @@ fn save_campaign_log(
     let review = game.scorecard();
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}",
         game.campaign_year,
         if game.region.is_some() {
             "local"
@@ -1458,7 +1530,9 @@ fn save_campaign_log(
         review.mobilization,
         review.event_response,
         review.resource_management,
-        review.versatility
+        review.versatility,
+        game.exposed_tactics,
+        game.sanctioned_funds
     )
     .map_err(|error| error.to_string())?;
     file.flush().map_err(|error| error.to_string())?;
@@ -1508,7 +1582,7 @@ fn print_usage() {
   project-twn --regions
   project-twn --parties
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
-      [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable]
+      [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable|hardball]
       [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
   project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--strategy 策略]
       [--sweep-styles | --sweep-strategies | --sensitivity | --interaction-sensitivity]
@@ -1525,9 +1599,10 @@ fn print_usage() {
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
-策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務及資源續航拆成可組合模組；--strategy 選擇權重組合，互動模式提供排序建議，--auto 依排序採取行動。
+策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。
+--strategy 選擇七種權重組合，互動模式顯示行動分類、排序及預估揭露風險，--auto 依排序採取行動。
 策略分數是遊戲啟發式，支持度是模型一步期望值；執行後另外顯示含 seed 波動與對手反應的實際變化，兩者都不是民調或選舉預測。
-批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sweep-strategies 以同一 seed 比較六種策略模組組合（最多 1,000 個 seed）；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
+批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sweep-strategies 以同一 seed 比較七種策略模組組合（最多 1,000 個 seed），並回報平均揭露次數與懲處資源；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
     );
 }
 

@@ -3,7 +3,7 @@
 //! Recommendation scores are decision heuristics over this game's modeled
 //! support, context, and resources. They are not empirical vote estimates.
 
-use crate::sim::{actions_for, ActionPreview, GameError, GameState};
+use crate::sim::{campaign_actions_for, ActionPreview, GameError, GameState, TacticCategory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrategyProfile {
@@ -13,16 +13,18 @@ pub enum StrategyProfile {
     Mobilization,
     TrustBuilding,
     Sustainability,
+    Hardball,
 }
 
 impl StrategyProfile {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Balanced,
         Self::Persuasion,
         Self::IssueResponse,
         Self::Mobilization,
         Self::TrustBuilding,
         Self::Sustainability,
+        Self::Hardball,
     ];
 
     pub fn key(self) -> &'static str {
@@ -33,6 +35,7 @@ impl StrategyProfile {
             Self::Mobilization => "mobilization",
             Self::TrustBuilding => "trust",
             Self::Sustainability => "sustainable",
+            Self::Hardball => "hardball",
         }
     }
 
@@ -44,6 +47,7 @@ impl StrategyProfile {
             Self::Mobilization => "投票動員",
             Self::TrustBuilding => "信任修復",
             Self::Sustainability => "資源續航",
+            Self::Hardball => "高壓攻防",
         }
     }
 
@@ -55,46 +59,24 @@ impl StrategyProfile {
             "mobilization" | "turnout" | "動員" => Ok(Self::Mobilization),
             "trust" | "信任" => Ok(Self::TrustBuilding),
             "sustainable" | "resource" | "續航" => Ok(Self::Sustainability),
+            "hardball" | "高壓" => Ok(Self::Hardball),
             _ => Err(format!(
-                "策略請用 balanced、persuasion、issue、mobilization、trust 或 sustainable，收到：{value}"
+                "策略請用 balanced、persuasion、issue、mobilization、trust、sustainable 或 hardball，收到：{value}"
             )),
         }
     }
 
     fn weight(self, axis: StrategyAxis) -> f64 {
-        match (self, axis) {
-            (Self::Balanced, _) => 1.0,
-            (Self::Persuasion, StrategyAxis::Support) => 2.0,
-            (Self::Persuasion, StrategyAxis::Context) => 0.7,
-            (Self::Persuasion, StrategyAxis::Trust) => 0.5,
-            (Self::Persuasion, StrategyAxis::Mobilization) => 0.4,
-            (Self::Persuasion, StrategyAxis::Objective) => 0.5,
-            (Self::Persuasion, StrategyAxis::Sustainability) => 0.5,
-            (Self::IssueResponse, StrategyAxis::Support) => 0.8,
-            (Self::IssueResponse, StrategyAxis::Context) => 2.0,
-            (Self::IssueResponse, StrategyAxis::Trust) => 0.7,
-            (Self::IssueResponse, StrategyAxis::Mobilization) => 0.6,
-            (Self::IssueResponse, StrategyAxis::Objective) => 0.6,
-            (Self::IssueResponse, StrategyAxis::Sustainability) => 0.5,
-            (Self::Mobilization, StrategyAxis::Support) => 0.7,
-            (Self::Mobilization, StrategyAxis::Context) => 0.6,
-            (Self::Mobilization, StrategyAxis::Trust) => 0.5,
-            (Self::Mobilization, StrategyAxis::Mobilization) => 2.0,
-            (Self::Mobilization, StrategyAxis::Objective) => 0.6,
-            (Self::Mobilization, StrategyAxis::Sustainability) => 0.4,
-            (Self::TrustBuilding, StrategyAxis::Support) => 0.65,
-            (Self::TrustBuilding, StrategyAxis::Context) => 0.7,
-            (Self::TrustBuilding, StrategyAxis::Trust) => 2.0,
-            (Self::TrustBuilding, StrategyAxis::Mobilization) => 0.6,
-            (Self::TrustBuilding, StrategyAxis::Objective) => 0.6,
-            (Self::TrustBuilding, StrategyAxis::Sustainability) => 0.55,
-            (Self::Sustainability, StrategyAxis::Support) => 0.7,
-            (Self::Sustainability, StrategyAxis::Context) => 0.5,
-            (Self::Sustainability, StrategyAxis::Trust) => 0.8,
-            (Self::Sustainability, StrategyAxis::Mobilization) => 0.75,
-            (Self::Sustainability, StrategyAxis::Objective) => 0.75,
-            (Self::Sustainability, StrategyAxis::Sustainability) => 2.0,
-        }
+        let weights = match self {
+            Self::Balanced => [1.0; 8],
+            Self::Persuasion => [2.0, 0.7, 0.5, 0.4, 0.5, 0.5, 0.55, 0.6],
+            Self::IssueResponse => [0.8, 2.0, 0.7, 0.6, 0.6, 0.5, 0.8, 0.65],
+            Self::Mobilization => [0.7, 0.6, 0.5, 2.0, 0.6, 0.4, 0.65, 1.0],
+            Self::TrustBuilding => [0.65, 0.7, 2.0, 0.6, 0.6, 0.55, 2.0, 0.75],
+            Self::Sustainability => [0.7, 0.5, 0.8, 0.75, 0.75, 2.0, 1.2, 1.0],
+            Self::Hardball => [2.0, 0.8, 0.35, 0.8, 0.5, 0.8, 0.15, 0.75],
+        };
+        weights[axis.index()]
     }
 }
 
@@ -106,6 +88,23 @@ pub enum StrategyAxis {
     Mobilization,
     Objective,
     Sustainability,
+    Integrity,
+    Infrastructure,
+}
+
+impl StrategyAxis {
+    fn index(self) -> usize {
+        match self {
+            Self::Support => 0,
+            Self::Context => 1,
+            Self::Trust => 2,
+            Self::Mobilization => 3,
+            Self::Objective => 4,
+            Self::Sustainability => 5,
+            Self::Integrity => 6,
+            Self::Infrastructure => 7,
+        }
+    }
 }
 
 /// A scoring component that can be composed into a `StrategyEngine`.
@@ -138,6 +137,8 @@ impl StrategyEngine {
                 Box::new(MobilizationModule),
                 Box::new(WeeklyObjectiveModule),
                 Box::new(SustainabilityModule),
+                Box::new(IntegrityModule),
+                Box::new(InfrastructureModule),
             ],
         }
     }
@@ -152,8 +153,8 @@ impl StrategyEngine {
     }
 
     pub fn rank_actions(&self, game: &GameState) -> Vec<StrategyRecommendation> {
-        let mut recommendations = actions_for(game.side)
-            .iter()
+        let mut recommendations = campaign_actions_for(game.side)
+            .into_iter()
             .filter_map(|action| {
                 let preview = game.preview_action(action.id).ok()?;
                 let mut score = 0.0;
@@ -337,6 +338,45 @@ impl StrategyModule for SustainabilityModule {
     }
 }
 
+struct IntegrityModule;
+
+impl StrategyModule for IntegrityModule {
+    fn axis(&self) -> StrategyAxis {
+        StrategyAxis::Integrity
+    }
+
+    fn score(&self, _game: &GameState, preview: &ActionPreview) -> f64 {
+        -preview.detection_probability * 4.5 - preview.expected_sanction_fine * 0.2
+    }
+
+    fn rationale(&self, _game: &GameState, preview: &ActionPreview) -> Option<&'static str> {
+        (preview.category == TacticCategory::Negative).then_some("納入揭露機率與懲處成本")
+    }
+}
+
+struct InfrastructureModule;
+
+impl StrategyModule for InfrastructureModule {
+    fn axis(&self) -> StrategyAxis {
+        StrategyAxis::Infrastructure
+    }
+
+    fn score(&self, game: &GameState, preview: &ActionPreview) -> f64 {
+        let remaining_weeks = f64::from(crate::sim::CAMPAIGN_ROUNDS.saturating_sub(game.round));
+        preview.infrastructure_delta
+            * (remaining_weeks / f64::from(crate::sim::CAMPAIGN_ROUNDS))
+            * 0.06
+    }
+
+    fn rationale(&self, game: &GameState, preview: &ActionPreview) -> Option<&'static str> {
+        if preview.infrastructure_delta > 0.0 && game.round < 8 {
+            Some("及早建立組織，可讓後續地面行動受益")
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +434,36 @@ mod tests {
             score(StrategyProfile::Persuasion),
             score(StrategyProfile::Sustainability)
         );
+    }
+
+    #[test]
+    fn integrity_module_accounts_for_negative_action_exposure_and_fines() {
+        let game = GameState::new_with_style(2024, Side::Challenger, 58, CampaignStyle::Balanced);
+        let risky = game
+            .preview_action(crate::sim::ActionId::FabricatedPoll)
+            .unwrap();
+        let legitimate = game.preview_action(crate::sim::ActionId::Debate).unwrap();
+        let module = IntegrityModule;
+
+        assert!(module.score(&game, &risky) < 0.0);
+        assert_eq!(module.score(&game, &legitimate), 0.0);
+        assert!(risky.expected_sanction_fine > 0.0);
+    }
+
+    #[test]
+    fn campaign_engine_ranks_shared_actions_and_exposes_tactic_categories() {
+        let game = GameState::new_with_style(2024, Side::Challenger, 59, CampaignStyle::Balanced);
+        let recommendations = StrategyEngine::new(StrategyProfile::Balanced).rank_actions(&game);
+
+        assert!(recommendations.iter().any(|entry| {
+            entry.preview.action_name == "成立後援會與地方聯絡網"
+                && entry.preview.infrastructure_delta > 0.0
+        }));
+        assert!(recommendations.iter().any(|entry| {
+            entry.preview.action_name == "匿名黑函／未查證指控"
+                && entry.preview.detection_probability > 0.0
+        }));
+        assert!(StrategyProfile::parse("hardball").is_ok());
     }
 
     struct EventOnlyModule;

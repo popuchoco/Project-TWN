@@ -40,7 +40,7 @@ jobs:
           $rows = @(Get-Content target/ci-batch-runs.tsv)
           if ($rows.Count -ne 9) { throw "Expected a header and 8 style/seed rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 26) { throw "Unexpected batch TSV column count." }
+            if ($row.Split("`t").Count -ne 28) { throw "Unexpected batch TSV column count." }
           }
 
       - name: Smoke-test paired parameter sensitivity
@@ -49,7 +49,7 @@ jobs:
           $rows = @(Get-Content target/ci-sensitivity-runs.tsv)
           if ($rows.Count -ne 31) { throw "Expected a header and 30 one-factor rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 26) { throw "Unexpected sensitivity TSV column count." }
+            if ($row.Split("`t").Count -ne 28) { throw "Unexpected sensitivity TSV column count." }
           }
 
       - name: Smoke-test paired parameter interaction sensitivity
@@ -58,20 +58,24 @@ jobs:
           $rows = @(Get-Content target/ci-interaction-runs.tsv)
           if ($rows.Count -ne 85) { throw "Expected a header and 84 two-factor corner rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 26) { throw "Unexpected interaction TSV column count." }
+            if ($row.Split("`t").Count -ne 28) { throw "Unexpected interaction TSV column count." }
           }
 
       - name: Smoke-test strategy profile comparison
         run: |
           cargo run -- --batch 1 --year 2024 --role challenger --seed 77 --sweep-strategies --batch-log target/ci-strategy-runs.tsv
           $rows = @(Get-Content target/ci-strategy-runs.tsv)
-          if ($rows.Count -ne 7) { throw "Expected a header and 6 strategy rows; got $($rows.Count)." }
+          if ($rows.Count -ne 8) { throw "Expected a header and 7 strategy rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 26) { throw "Unexpected strategy TSV column count." }
+            if ($row.Split("`t").Count -ne 28) { throw "Unexpected strategy TSV column count." }
           }
           $strategies = @($rows | Select-Object -Skip 1 | ForEach-Object { $_.Split("`t")[5] } | Sort-Object -Unique)
-          if ($strategies.Count -ne 6) { throw "Expected six distinct strategy profiles; got $($strategies.Count)." }
+          if ($strategies.Count -ne 7) { throw "Expected seven distinct strategy profiles; got $($strategies.Count)." }
           @("1", "q") | cargo run -- --year 2024 --role challenger --strategy issue --seed 77 | Out-File -Encoding utf8 target/ci-strategy-advice.txt
           $advice = Get-Content target/ci-strategy-advice.txt -Raw
           if (-not $advice.Contains("策略分")) { throw "Interactive action list omitted strategy ranking." }
           if (-not $advice.Contains("實際變化")) { throw "Action outcome omitted realized support change." }
+          if (-not $advice.Contains("正面選戰")) { throw "Interactive action list omitted positive tactics." }
+          if (-not $advice.Contains("中立選戰")) { throw "Interactive action list omitted neutral tactics." }
+          if (-not $advice.Contains("負面／高風險選戰")) { throw "Interactive action list omitted negative tactics." }
+          if (-not $advice.Contains("預估揭露")) { throw "Interactive action list omitted exposure forecasts." }
