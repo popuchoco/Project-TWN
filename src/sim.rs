@@ -1,4 +1,4 @@
-use crate::campaign::{anniversary_week, CampaignSetup, EventTimeline, DATED_EVENTS};
+use crate::campaign::{anniversary_day_offset, CampaignSetup, EventTimeline, DATED_EVENTS};
 use crate::history::{
     baseline_election, challenger_candidate_index, events_for_campaign, incumbent_candidate_index,
     party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
@@ -2321,16 +2321,19 @@ fn make_anniversary_event_schedule(
     election_date: &str,
 ) -> Vec<Option<&'static EventCard>> {
     let mut schedule = vec![None; CAMPAIGN_ROUNDS as usize];
+    let mut nearest_date_offsets = vec![None; CAMPAIGN_ROUNDS as usize];
     for event in events {
         let Some(dated_event) = DATED_EVENTS.iter().find(|dated| dated.title == event.title) else {
             continue;
         };
-        let Some(week) = anniversary_week(dated_event.date, election_date) else {
+        let Some(days_before) = anniversary_day_offset(dated_event.date, election_date) else {
             continue;
         };
-        let slot = &mut schedule[week as usize];
-        if slot.is_none() {
-            *slot = Some(*event);
+        let week = 11 - (days_before / 7) as u8;
+        let slot = usize::from(week);
+        if nearest_date_offsets[slot].is_none_or(|previous| days_before < previous) {
+            schedule[slot] = Some(*event);
+            nearest_date_offsets[slot] = Some(days_before);
         }
     }
     schedule

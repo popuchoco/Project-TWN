@@ -238,6 +238,13 @@ pub const DATED_EVENTS: &[DatedEvent] = &[
 /// campaign window immediately before an election date. Returns a zero-based
 /// campaign week, or `None` when that anniversary falls outside the window.
 pub fn anniversary_week(event_date: &str, election_date: &str) -> Option<u8> {
+    anniversary_day_offset(event_date, election_date)
+        .map(|days_before| 11 - (days_before / 7) as u8)
+}
+
+/// Return the number of days between the event anniversary and election day
+/// when the date falls inside the twelve-week campaign window.
+pub fn anniversary_day_offset(event_date: &str, election_date: &str) -> Option<u16> {
     let (event_month, event_day) = month_day(event_date)?;
     let (election_year, election_month, election_day) = full_date(election_date)?;
     let days_in_year = if is_leap_year(election_year) {
@@ -251,7 +258,7 @@ pub fn anniversary_week(event_date: &str, election_date: &str) -> Option<u8> {
     if days_before >= 12 * 7 {
         return None;
     }
-    Some(11 - (days_before / 7) as u8)
+    Some(days_before)
 }
 
 fn full_date(value: &str) -> Option<(u16, u8, u8)> {
