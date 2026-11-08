@@ -1176,7 +1176,7 @@ mod tests {
             .unwrap();
         let patriot_association = EVENTS
             .iter()
-            .find(|event| event.title.contains("愛國同心會"))
+            .find(|event| event.title == "愛國同心會成員參選與賄選判決")
             .unwrap();
         assert_ne!(chou.title, patriot_association.title);
         assert!(chou.description.contains("與愛國同心會相關議題分開呈現"));
