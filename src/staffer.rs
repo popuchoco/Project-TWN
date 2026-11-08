@@ -737,6 +737,51 @@ pub fn daily_scene(week: u8, day: u8) -> Option<(&'static str, &'static str)> {
     ))
 }
 
+/// A once-per-arc callback that lets weekly staff decisions leave a visible
+/// mark on the daily campaign story without adding another resource action.
+pub fn daily_route_echo(week: u8, day: u8, progress: StafferProgress) -> Option<&'static str> {
+    let decision_index = match (week, day) {
+        (1, 2) => 0,
+        (3, 1) => 1,
+        (5, 1) => 2,
+        (7, 1) => 3,
+        (9, 1) => 4,
+        (11, 1) => 5,
+        _ => return None,
+    };
+    let decision = progress.decision(decision_index)?;
+    Some(match decision {
+        StafferDecision::Skipped => match decision_index {
+            0 => "林予安沒有替團隊定下主軸，白板上仍留著三種說法；今天每個人都得說明自己為何選擇其中一種。",
+            1 => "陳秀惠把尚未回覆的陳情副本留在總部。沒有幕僚會議結論，地方窗口仍照原本流程追蹤。",
+            2 => "吳明哲照常寄來拜會邀請，卻沒有收到明確分工；地方夥伴各自排定行程。",
+            3 => "周以晴把待查事項列進報導，團隊沒有統一回應；每位發言人都要自行核對資料。",
+            4 => "林予安把支持度摘要收進資料夾，沒有追逐單週變化；團隊沿用既有安排，等待下一次檢視。",
+            _ => "最後布局沒有新的協調決定。志工仍照既有排班出發，總部把尚未處理的承諾交給投票日後的團隊。",
+        },
+        StafferDecision::Chosen(id) => match id {
+            StafferChoiceId::FocusLivelihood => "陳秀惠在白板旁補上一句：「回覆居民的日期也要寫上去。」從今天起，民生主張旁多了一欄追蹤期限。",
+            StafferChoiceId::FocusOpenGovernment => "周以晴把查核表收進採訪資料：「沒完成的部分也請列出來。」團隊開始把進度和空白一起公開。",
+            StafferChoiceId::FocusDemocracy => "志工把座談名單貼上牆，林予安提醒：「被影響的人要坐在桌邊，不只出現在海報上。」",
+            StafferChoiceId::PetitionFieldVisit => "現勘照片送回總部，陳秀惠圈出尚未改善的路段：「我會帶居民回來看你們有沒有再來。」",
+            StafferChoiceId::PetitionVerify => "查核表把已確認和待確認分成兩欄。周以晴說：「我會追問，但不把還不知道的寫成答案。」",
+            StafferChoiceId::PetitionLocalLiaison => "地方窗口終於有了姓名和回覆期限；吳明哲提醒，建立聯絡網只是開始，回電才算數。",
+            StafferChoiceId::NetworkListening => "吳明哲帶回一疊不同版本的需求清單。林予安沒有合併掉分歧，改把下次回訪日期逐一寫上。",
+            StafferChoiceId::NetworkForum => "座談紀錄公開後，兩個團體對優先順序仍有不同意見；團隊承諾把差異留在紀錄，不剪成一致口號。",
+            StafferChoiceId::NetworkCoordination => "分工表讓志工很快找到位置，吳明哲也要求公布責任窗口；沒有人能再把漏接的回覆推給別組。",
+            StafferChoiceId::EventVerify => "周以晴拿到逐項核對的回應稿：「這次我會把已知、未知和期限一起播。」團隊先把速度讓給可信度。",
+            StafferChoiceId::EventService => "服務小組先接起居民電話，候選人的公開行程往後挪了半小時；林予安要求不要把現場協助變成拍照背景。",
+            StafferChoiceId::EventCounter => "反駁資料如期發布，但林予安刪掉一句揣測動機的話：「我們要攻的是說法，不是替對方編故事。」",
+            StafferChoiceId::PollReframe => "林予安把訊息改成一項可執行承諾，並請發言人逐一向原支持者解釋為何調整，而不是假裝從未改變。",
+            StafferChoiceId::PollGroundwork => "志工排班表多了幾個名字，也多了幾個空白；地方回訪開始補上支持度摘要看不見的原因。",
+            StafferChoiceId::PollHoldLine => "政見進度和成本表一併上線。周以晴提醒候選人，公開承諾之後，未完成的部分也會被逐項追問。",
+            StafferChoiceId::ClosingDebate => "最後一次演練沒有刪去難題。候選人對著空椅子重答一次，林予安只說：「別把還沒做到的說成已經完成。」",
+            StafferChoiceId::ClosingField => "志工接過最後一輪投票提醒名單，陳秀惠留下尚待處理的陳情：「選舉結束後，這張單也要有人接。」",
+            StafferChoiceId::ClosingCoalition => "合作夥伴在共同政見旁簽名，也保留各自的差異；吳明哲把公開版本送到地方群組，沒有替任何人背書。",
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,7 +858,7 @@ mod tests {
         assert!(progress.summary().contains("skip"));
         assert!(progress.is_valid(2));
         assert!(!progress.is_valid(0));
-        assert!(progress.ending_note().contains("最後一週"));
+        assert!(progress.ending_note().contains("投票日前夕"));
     }
 
     #[test]
@@ -828,5 +873,27 @@ mod tests {
         assert!(daily_scene(0, 1).is_none());
         assert!(daily_scene(13, 1).is_none());
         assert!(daily_scene(1, 8).is_none());
+    }
+
+    #[test]
+    fn daily_route_echoes_reflect_choices_and_only_appear_at_story_beats() {
+        let mut progress = StafferProgress::default();
+        assert!(daily_route_echo(1, 2, progress).is_none());
+
+        let focus = choice_for(0, StafferChoiceId::FocusLivelihood).unwrap();
+        progress.record(0, StafferDecision::Chosen(focus.id), focus.focus);
+        assert!(daily_route_echo(1, 2, progress)
+            .unwrap()
+            .contains("回覆居民的日期"));
+        assert!(daily_route_echo(1, 3, progress).is_none());
+
+        let verify = choice_for(1, StafferChoiceId::PetitionVerify).unwrap();
+        progress.record(1, StafferDecision::Chosen(verify.id), verify.focus);
+        assert!(daily_route_echo(3, 1, progress).unwrap().contains("待確認"));
+
+        progress.record(2, StafferDecision::Skipped, None);
+        assert!(daily_route_echo(5, 1, progress)
+            .unwrap()
+            .contains("拜會邀請"));
     }
 }

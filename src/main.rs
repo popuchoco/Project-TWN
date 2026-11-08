@@ -10,7 +10,8 @@ use project_twn::sim::{
     CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
 use project_twn::staffer::{
-    continuity_bonus as staffer_continuity_bonus, daily_scene as staffer_daily_scene,
+    continuity_bonus as staffer_continuity_bonus, daily_route_echo as staffer_daily_route_echo,
+    daily_scene as staffer_daily_scene,
 };
 use project_twn::story::coherence_bonus;
 use project_twn::strategy::{
@@ -944,6 +945,9 @@ fn print_staffer_daily_scene(game: &GameState) {
     let day = game.day + 1;
     if let Some((arc, scene)) = staffer_daily_scene(week, day) {
         println!("\n【今日選戰｜第 {week} 週・第 {day} 天｜{arc}】{scene}");
+    }
+    if let Some(echo) = staffer_daily_route_echo(week, day, game.staffer_progress) {
+        println!("劇情延續：{echo}");
     }
     if game.day == 0 {
         let reminder = match game.side {
