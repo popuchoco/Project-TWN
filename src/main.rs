@@ -706,7 +706,9 @@ fn save_batch_log(
             .read_line(&mut header)
             .map_err(|error| error.to_string())?;
         if header.trim_end() != BATCH_LOG_HEADER {
-            return Err("批次紀錄欄位與目前版本不同，請指定新的 --batch-log 檔名以免混合格式。".to_string());
+            return Err(
+                "批次紀錄欄位與目前版本不同，請指定新的 --batch-log 檔名以免混合格式。".to_string(),
+            );
         }
     }
     let mut file = OpenOptions::new()
