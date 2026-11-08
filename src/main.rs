@@ -65,7 +65,7 @@ fn run() -> Result<(), String> {
     let region = match options.region.as_deref() {
         Some(query) => Some(
             find_region(query)
-                .ok_or_else(|| format!("找不到地方情境：{query}。使用 --regions 查看可選清單。"))?,
+                .ok_or_else(|| format!("找不到地方情境：{query}。使用 --regions 檢視可選清單。"))?,
         ),
         None => None,
     };
@@ -75,7 +75,7 @@ fn run() -> Result<(), String> {
     let selected_party = match options.party.as_deref() {
         Some(query) => Some(
             find_party(query)
-                .ok_or_else(|| format!("找不到政黨模板：{query}。使用 --parties 查看清單。"))?,
+                .ok_or_else(|| format!("找不到政黨情境範本：{query}。使用 --parties 檢視清單。"))?,
         ),
         None => None,
     };
@@ -654,7 +654,7 @@ fn print_regions() {
 }
 
 fn print_parties() {
-    println!("可選第三勢力／政黨情境模板（不代表每一黨都會參加2026選舉；軸線是策略參數）\n");
+    println!("可選第三勢力／政黨情境範本（不代表每一黨都會參加2026年選舉；軸線是策略參數）\n");
     for party in PARTY_PROFILES {
         println!(
             "  {:<12} {:<18} {}",
@@ -748,7 +748,7 @@ fn print_history() {
     for snapshot in LEGISLATURE_SNAPSHOTS {
         println!("  {}：{}", snapshot.year, snapshot.summary);
     }
-    println!("\n近代台灣選戰與社會事件（事件說明為背景摘要，不是單一因果判斷）");
+    println!("\n近代臺灣選戰與社會事件（事件說明為背景摘要，不是單一因果判斷）");
     for event in EVENTS {
         println!("  {}｜{}：{}", event.year, event.title, event.description);
     }
@@ -765,5 +765,5 @@ fn print_history() {
 }
 
 fn print_usage() {
-    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --parties\n  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n  cargo run -- --parties\n\n年份範圍：1996–2026。地方模式可用 --regions 查看22縣市；--parties 查看歷史政黨模板。競選為12週、每週7天，共84次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可把每場結果與戰役操作評分附加到 TSV，便於保存長期戰績。");
+    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --parties\n  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n  cargo run -- --parties\n\n年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視歷史政黨範本。競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可將每場結果與戰役操作評分附加至 TSV，累積長期戰績。");
 }

@@ -476,7 +476,7 @@ pub const PARTY_PROFILES: &[PartyProfile] = &[
     PartyProfile {
         name: "民主進步黨",
         camp: "泛綠主流",
-        description: "大型政黨；以台灣主體與民主治理為主要政治識別。",
+        description: "大型政黨；以臺灣主體與民主治理為主要政治識別。",
         blue_green_axis: 100,
         economic_axis: -10,
         cross_strait_axis: 85,
@@ -494,7 +494,7 @@ pub const PARTY_PROFILES: &[PartyProfile] = &[
     PartyProfile {
         name: "台灣團結聯盟",
         camp: "本土偏綠／右派取向",
-        description: "台灣本土與主權取向；此處依本次設計採用右派經濟軸與偏綠聯盟軸。",
+        description: "臺灣本土與主權取向；此處依本次設計採用右派經濟軸與偏綠聯盟軸。",
         blue_green_axis: 75,
         economic_axis: 55,
         cross_strait_axis: 90,
@@ -569,7 +569,8 @@ pub const PARTY_PROFILES: &[PartyProfile] = &[
     PartyProfile {
         name: "國會政黨聯盟",
         camp: "歷史宗教動員型",
-        description: "曾以宗教社群和傳統價值議題參與選舉；僅作歷史策略模板，不表示其2026年仍提名。",
+        description:
+            "曾以宗教社群和傳統價值議題參與選舉；僅作歷史策略範本，不表示其 2026 年仍提名。",
         blue_green_axis: -10,
         economic_axis: 35,
         cross_strait_axis: -30,
@@ -756,7 +757,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2000,
         title: "首次和平政黨輪替與少數政府治理",
-        description: "中央政權首次以和平方式移交，常被放在李登輝時期漸進民主化、俗稱「寧靜革命」的脈絡中理解；陳水扁政府未取得立法院過半，行政立法協商與政策落地成為執政難題。",
+        description: "中央政權首次以和平方式移交，常被放在李登輝時期漸進民主化、俗稱「寧靜革命」的脈絡中理解；陳水扁政府未取得立法院過半，行政立法協商與政策落實成為執政難題。",
         issue: Issue::Governance,
         active_campaign_years: &[2004, 2008],
     },
@@ -833,7 +834,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2014,
         title: "香港雨傘運動",
-        description: "香港爭取普選的公民抗爭，成為台灣社會討論民主制度、自治與兩岸政治框架的重要參照；不把香港事件直接等同台灣選民態度。",
+        description: "香港爭取普選的公民抗爭，成為臺灣社會討論民主制度、自治與兩岸政治框架的重要參照；不把香港事件直接等同臺灣選民態度。",
         issue: Issue::CrossStrait,
         active_campaign_years: &[2016, 2020, 2024],
     },
@@ -854,7 +855,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2016,
         title: "愛國同心會與香港人士討論港獨衝突",
-        description: "2016年臺北一處飯店發生愛國同心會人士因鄰座香港人士談論港獨而上前嗆聲、演變成肢體衝突的事件，警方表示將相關人士依法處理。此卡聚焦異議表達、政治標籤與公共安全；與黃安對周子瑜的社群發文及其後的選舉傳播分開記錄。",
+        description: "2016年臺北一處飯店發生愛國同心會人士因鄰座香港人士談論港獨而上前嗆聲、演變成肢體衝突的事件，警方表示將相關人士依法處理。此卡聚焦異議表達、政治標籤與公共安全；與黃安對周子瑜的社群貼文及其後的選舉傳播分開記錄。",
         issue: Issue::Civic,
         active_campaign_years: &[2020, 2024, 2026],
     },
@@ -896,7 +897,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2018,
         title: "愛國同心會成員參選與賄選判決",
-        description: "愛國同心會成員張秀葉參選2018年臺北市議員選舉，涉向選民提供餐飲。最高法院於2022年駁回上訴、判刑3年5月定讞。此為特定候選人及個案的司法結果，與黃安對周子瑜的社群發文不是同一事件，也不據此推論所有組織成員或政治檢舉皆違法。",
+        description: "愛國同心會成員張秀葉參選2018年臺北市議員選舉，涉向選民提供餐飲。最高法院於2022年駁回上訴、判刑3年5月定讞。此為特定候選人及個案的司法結果，與黃安對周子瑜的社群貼文不是同一事件，也不據此推論所有組織成員或政治檢舉皆違法。",
         issue: Issue::Trust,
         active_campaign_years: &[2022, 2024, 2026],
     },
@@ -910,7 +911,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2019,
         title: "香港反送中運動",
-        description: "香港逃犯條例修訂引發大規模示威及持續爭議，台灣社會關注自治、人權與「一國兩制」承諾；不預設對特定台灣政黨的投票效果。",
+        description: "香港逃犯條例修訂引發大規模示威及持續爭議，臺灣社會關注自治、人權與「一國兩制」承諾；不預設對特定臺灣政黨的投票效果。",
         issue: Issue::Civic,
         active_campaign_years: &[2020, 2024, 2026],
     },
@@ -924,7 +925,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2020,
         title: "香港國安法實施",
-        description: "香港國安法於2020年6月實施，台灣關注香港自治、公民自由、法治及兩岸政治制度差異。",
+        description: "香港國安法於2020年6月實施，臺灣社會關注香港自治、公民自由、法治及兩岸政治制度差異。",
         issue: Issue::Rights,
         active_campaign_years: &[2024, 2026],
     },
@@ -952,7 +953,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2024,
         title: "香港基本法第23條立法",
-        description: "香港《維護國家安全條例》於2024年3月生效；台灣公共討論涉及國安治理、自治、人權及國際信任。",
+        description: "香港《維護國家安全條例》於2024年3月生效；臺灣公共討論涉及國安治理、自治、人權及國際信任。",
         issue: Issue::Rights,
         active_campaign_years: &[2026],
     },
@@ -1001,7 +1002,7 @@ pub const EVENTS: &[EventCard] = &[
     EventCard {
         year: 2026,
         title: "香港國安法第43條實施細則修訂",
-        description: "香港特區政府於2026年3月23日公布並即日實施第43條實施細則修訂；台灣社會持續討論香港法治、人權與區域制度差異。",
+        description: "香港特區政府於2026年3月23日公布並即日實施第43條實施細則修訂；臺灣社會持續討論香港法治、人權與區域制度差異。",
         issue: Issue::Rights,
         active_campaign_years: &[2026],
     },

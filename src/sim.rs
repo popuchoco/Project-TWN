@@ -227,7 +227,7 @@ pub struct ActionSpec {
 const INCUMBENT_ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         id: ActionId::PolicyDelivery,
-        name: "施政方案落地",
+        name: "政策落實",
         description: "以可量化的政策進度與公共服務表現爭取支持。",
         cost: 3,
         base_swing: 0.38,
