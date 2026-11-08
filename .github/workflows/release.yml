@@ -1,0 +1,109 @@
+name: Test release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            extension: exe
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            extension: ""
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            extension: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            extension: ""
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+
+      - name: Test tagged source
+        run: cargo test --locked --all-targets
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Smoke-test release binary
+        shell: bash
+        run: |
+          ./target/${{ matrix.target }}/release/project-twn${{ matrix.extension == 'exe' && '.exe' || '' }} --history > /dev/null
+          ./target/${{ matrix.target }}/release/project-twn${{ matrix.extension == 'exe' && '.exe' || '' }} --help > /dev/null
+
+      - name: Package Windows tester bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $name = "project-twn-$tag-${{ matrix.target }}"
+          $package = "package/$name"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/project-twn.exe" "$package/project-twn.exe"
+          Copy-Item -Path README.md, LICENSE -Destination $package
+          Copy-Item -Path docs -Destination "$package/docs" -Recurse
+          Compress-Archive -Path "$package/*" -DestinationPath "dist/$name.zip" -Force
+
+      - name: Package Unix tester bundle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="project-twn-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "package/$name" dist
+          cp "target/${{ matrix.target }}/release/project-twn" "package/$name/"
+          cp README.md LICENSE "package/$name/"
+          cp -R docs "package/$name/docs"
+          tar -czf "dist/$name.tar.gz" -C "package/$name" .
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish pre-release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Download platform bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Project-TWN $GITHUB_REF_NAME" \
+            --notes-file docs/測試版發行說明.md \
+            --prerelease

@@ -1,0 +1,57 @@
+name: 遊戲試玩回饋
+description: 回報安裝問題、玩法困惑、無聊點或想玩的新內容
+title: "[試玩回饋] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        不需要懂政治學或選舉統計。告訴我們哪個選擇有趣、哪裡卡住、哪一週開始想跳過，就很有幫助。
+  - type: input
+    id: version
+    attributes:
+      label: 測試版版本
+      description: Releases 頁面上的版本標籤，例如 v0.1.0-alpha.1。
+      placeholder: v0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: 作業系統
+      options:
+        - Windows x64
+        - Linux x64
+        - macOS Intel
+        - macOS Apple Silicon
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 回饋類型
+      options:
+        - 無法安裝或啟動
+        - 規則或選單看不懂
+        - 節奏／重複感
+        - 策略取捨／平衡
+        - 歷史事件或情境
+        - 新玩法建議
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: 發生什麼事／玩起來如何？
+      description: 可附重現步驟、年份／地區／角色／seed，或哪一段讓你覺得有趣、無聊、困惑。
+      placeholder: 我玩到第 __ 週時……
+    validations:
+      required: true
+  - type: textarea
+    id: improvements
+    attributes:
+      label: 你最希望先改善什麼？
+      description: 請優先寫一件最重要的事，也可留空。
+    validations:
+      required: false
