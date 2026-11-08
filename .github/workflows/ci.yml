@@ -98,6 +98,10 @@ jobs:
           if (-not $advice.Contains("中立選戰")) { throw "Interactive action list omitted neutral tactics." }
           if (-not $advice.Contains("負面／高風險選戰")) { throw "Interactive action list omitted negative tactics." }
           if (-not $advice.Contains("預估揭露")) { throw "Interactive action list omitted exposure forecasts." }
+          if (-not $advice.Contains("本場玩家身分") -or -not $advice.Contains("玩家操控：侯友宜 / 趙少康")) { throw "Opening screen omitted the assigned player candidate." }
+          if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("柯文哲 / 吳欣盈")) { throw "Opening screen omitted the opponent roster." }
+          if (-not $advice.Contains("尚未建模國政／政府施政滿意度民調")) { throw "Opening screen did not distinguish election support from government approval." }
+          if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「侯友宜 / 趙少康")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
 
       - name: Smoke-test campaign setup and date mapping
         run: |

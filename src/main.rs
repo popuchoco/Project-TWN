@@ -502,6 +502,7 @@ fn parse_style(value: &str) -> Result<CampaignStyle, String> {
 
 fn ask_role() -> Result<Side, String> {
     loop {
+        println!("此處選的是執政／在野角色；玩家候選人會依年份與地區基準自動指派，開場會列出姓名或政黨情境代表。");
         println!("選擇陣營：1) 執政／尋求連任  2) 在野挑戰");
         print!("請輸入 1 或 2：");
         io::stdout().flush().map_err(|error| error.to_string())?;
@@ -533,6 +534,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
         game.setup.event_pack.label(),
         game.setup.timeline.label()
     );
+    print_player_assignment(game);
     if let Some(region) = game.region {
         println!(
             "地方情境：{}；上屆首長政黨為 {}。",
@@ -544,12 +546,12 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
         );
     } else {
         println!(
-            "歷史基準：{} 年總統選舉，初始民調以當年全國得票率為基準。",
+            "選舉基準：{} 年總統選舉，初始候選人支持度以該屆實際得票率為起點，不是當時民調。",
             game.baseline_year
         );
     }
     if game.region.is_none() && game.campaign_year != game.baseline_year {
-        println!("注意：這是以最近一次總統票作起點的替代情境，不是該年度的實際選舉結果。");
+        println!("注意：本場使用政黨情境代表，不是該年度的實際候選人；支持度沿用最近一次總統票作遊戲起點，不代表當期民調或選舉結果。");
     }
     if game.campaign_year == 2026 {
         if game.region.is_some() {
@@ -558,7 +560,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
             println!("2026全國代理情境：以2024總統票作全國基準，不是地方候選人或縣市民調；地方投票日為 2026-11-28。" );
         }
     }
-    println!("競選期：{CAMPAIGN_ROUNDS} 週 × {DAYS_PER_WEEK} 天，共 {} 個每日決策（布局／議題攻防／決戰三階段）；起始預算：{}　信任：{:.1}/100　體力：{:.1}/100", CAMPAIGN_ROUNDS as u16 * DAYS_PER_WEEK as u16, game.budget, game.trust, game.stamina);
+    println!("競選期：{CAMPAIGN_ROUNDS} 週 × {DAYS_PER_WEEK} 天，共 {} 個每日決策（布局／議題攻防／決戰三階段）；起始預算：{}　團隊信任：{:.1}/100　體力：{:.1}/100", CAMPAIGN_ROUNDS as u16 * DAYS_PER_WEEK as u16, game.budget, game.trust, game.stamina);
     println!(
         "每週會抽取一項陣營任務；達成可獲得最多 +1 預算。目標是遊戲任務，不代表現實政治建議。\n"
     );
@@ -566,6 +568,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
         "選民結構：{} 個遊戲用選民原型；權重是可調模型參數，不代表實際人口或選民占比。",
         VOTER_SEGMENTS.len()
     );
+    println!("民調口徑：本作目前只有候選人選舉支持度，尚未建模國政／政府施政滿意度民調；團隊信任指數也不是政府支持度。\n");
     println!(
         "玩家能力值（遊戲建構，非歷史評分）：政策 {:.0}／組織 {:.0}／溝通 {:.0}\n",
         game.player_attributes.policy,
@@ -574,18 +577,47 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
     );
 
     if !game.events.is_empty() {
-        println!("本情境公共議題（事件本身不預設政黨得失；回應方式才改變模擬民調）：");
+        println!(
+            "本情境公共議題（事件本身不預設政黨得失；回應方式才可能改變遊戲內候選人支持度）："
+        );
         for event in &game.events {
             println!("  • {}：{}", event.year, event.title);
         }
         println!();
     }
     print_poll_table(game);
-    println!("\n行動的民調效果會受信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
+    println!("\n行動對候選人支持度的效果會受團隊信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
+}
+
+fn print_player_assignment(game: &GameState) {
+    let player = &game.candidates[game.player_index];
+    let context = if game.region.is_some() {
+        "地方政黨情境代表"
+    } else if game.campaign_year == game.baseline_year {
+        "歷史選舉候選人"
+    } else {
+        "全國政黨情境代表"
+    };
+    println!("\n【本場玩家身分】");
+    println!("扮演角色：{}", game.side.label());
+    println!(
+        "玩家操控：{}｜政黨／名單：{}（{}）",
+        player.name, player.party, context
+    );
+    let opponents = game
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != game.player_index)
+        .map(|(_, candidate)| format!("{}（{}）", candidate.name, candidate.party))
+        .collect::<Vec<_>>()
+        .join("、");
+    println!("其他競爭者：{opponents}");
 }
 
 fn print_poll_table(game: &GameState) {
-    println!("對比式：多候選人支持度（單一選票情境）");
+    let player_name = &game.candidates[game.player_index].name;
+    println!("候選人選舉支持度｜對比式情境（遊戲模型值；非實際民調，也不是國政施政滿意度）");
     for (index, candidate) in game.candidates.iter().enumerate() {
         let marker = if index == game.player_index {
             "▶"
@@ -598,7 +630,7 @@ fn print_poll_table(game: &GameState) {
             candidate.name, game.polls[index]
         );
     }
-    println!("選民原型細分（權重／玩家支持）— 僅供觀察遊戲模型：");
+    println!("分眾支持度（原型權重／{player_name} 支持度）— 僅供觀察遊戲模型：");
     for segment in &game.voter_segments {
         let player_support = segment.polls.get(game.player_index).copied().unwrap_or(0.0);
         println!(
@@ -607,19 +639,21 @@ fn print_poll_table(game: &GameState) {
         );
     }
     if game.candidates.len() > 2 {
-        println!("互比式情境：若只比較玩家與單一對手，其他候選人的支持暫按各半轉移；這是遊戲簡化值，並非交叉民調。" );
+        println!("互比式簡化情境：把其他候選人的支持平均分配給比較雙方；這不是實際互比民調。");
         for (index, candidate) in game
             .candidates
             .iter()
             .enumerate()
             .filter(|(index, _)| *index != game.player_index)
         {
-            let undecided = (100.0 - game.polls[game.player_index] - game.polls[index]).max(0.0);
-            let player_share = game.polls[game.player_index] + undecided * 0.5;
+            let other_candidates =
+                (100.0 - game.polls[game.player_index] - game.polls[index]).max(0.0);
+            let player_share = game.polls[game.player_index] + other_candidates * 0.5;
             println!(
-                "  玩家 {:.1}% : {} {:.1}%",
+                "  若比較「{}」與「{}」：{:.1}% 對 {:.1}%",
+                game.candidates[game.player_index].name,
+                candidate.name,
                 player_share,
-                candidate.party,
                 100.0 - player_share
             );
         }
@@ -638,7 +672,7 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
             game.phase_label()
         );
         println!(
-            "剩餘預算：{}　信任：{:.1}　動員：{:.1}　體力：{:.1}",
+            "剩餘預算：{}　團隊信任：{:.1}　動員：{:.1}　體力：{:.1}",
             game.budget, game.trust, game.turnout_momentum, game.stamina
         );
         println!(
@@ -678,7 +712,7 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
             loop {
                 for (index, choice) in beat.choices.iter().enumerate() {
                     println!(
-                        "  {}) {}｜預算 {}｜支持 {:+.2}｜信任 {:+.1}｜動員 {:+.1}｜體力 {:+.1}{}",
+                        "  {}) {}｜預算 {}｜支持度 {:+.2}｜團隊信任 {:+.1}｜動員 {:+.1}｜體力 {:+.1}{}",
                         index + 1,
                         choice.label,
                         choice.budget_cost,
@@ -704,7 +738,7 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
                 }
                 match game.apply_story_choice(selection - 1) {
                     Ok(outcome) => {
-                        print_story_outcome(&outcome);
+                        print_story_outcome(game, &outcome);
                         break;
                     }
                     Err(error @ GameError::InsufficientBudget { .. }) => {
@@ -751,11 +785,13 @@ fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
     }
 }
 
-fn print_story_outcome(outcome: &StoryOutcome) {
+fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
+    let candidate_name = &game.candidates[game.player_index].name;
     println!(
-        "✓ {}｜{}：支持度 {:.2}% → {:.2}%（{:+.2} 點），信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
+        "✓ {}｜{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
         outcome.title,
         outcome.choice_label,
+        candidate_name,
         outcome.support_before,
         outcome.support_after,
         outcome.support_delta,
@@ -842,7 +878,7 @@ fn select_interactive_action(
                     String::new()
                 };
                 println!(
-                    "  {}) [{}] {}｜預算 {}｜支持 {:+.2}｜信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}｜策略分 {:.2}{}{}",
+                    "  {}) [{}] {}｜預算 {}｜支持度 {:+.2}｜團隊信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}｜策略分 {:.2}{}{}",
                     option_index + 1,
                     recommendation.preview.category.label(),
                     recommendation.preview.action_name,
@@ -947,7 +983,7 @@ fn run_auto(
             if let Some(index) = selected {
                 if let Ok(outcome) = game.apply_story_choice(index) {
                     if show_progress {
-                        print_story_outcome(&outcome);
+                        print_story_outcome(game, &outcome);
                     }
                 }
             } else {
@@ -1664,12 +1700,14 @@ fn tsv_cell(value: &str) -> String {
 }
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
+    let candidate_name = &game.candidates[game.player_index].name;
     println!(
-        "✓ 第 {} 週・第 {} 天 [{}] {}：玩家支持 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
+        "✓ 第 {} 週・第 {} 天 [{}] {}：{} 支持度 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
         outcome.week,
         outcome.day,
         outcome.category.label(),
         outcome.action_name,
+        candidate_name,
         outcome.share_before,
         outcome.share_after,
         outcome.share_after - outcome.share_before,
@@ -1704,7 +1742,7 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
         );
     }
     println!(
-        "  信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100；地面調度量能 {:.0}/55",
+        "  團隊信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100；地面調度量能 {:.0}/55",
         outcome.trust_after,
         outcome.turnout_after,
         outcome.stamina_after,
