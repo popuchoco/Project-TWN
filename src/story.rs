@@ -296,6 +296,90 @@ pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
     })
 }
 
+/// A short callback that carries the candidate's earlier story decisions into
+/// the next campaign act. The daily scene remains shared, but this line makes
+/// the candidate mode's route visibly responsive to prior choices.
+pub fn daily_route_echo(week: u8, day: u8, progress: StoryProgress) -> Option<&'static str> {
+    let decision_index = match (week, day) {
+        (3, 1) => 0,
+        (7, 1) => 1,
+        (11, 1) => 2,
+        _ => return None,
+    };
+    let decision = progress.decision(decision_index)?;
+    Some(match (decision_index, decision) {
+        (0, StoryDecision::Chosen(StoryChoiceId::FieldVisit)) => {
+            "陳秀惠把現勘紀錄放到候選人面前：「路口我陪你走過了，接下來請告訴居民何時回來。」"
+        }
+        (0, StoryDecision::Chosen(StoryChoiceId::PublishFacts)) => {
+            "周以晴拿著公開資料追問更新時間；候選人把已確認與待查項目分開說，沒有把未知補成承諾。"
+        }
+        (0, StoryDecision::Chosen(StoryChoiceId::CoordinateNetwork)) => {
+            "吳明哲帶來新的聯絡窗口，也帶來不同單位的回覆期限；候選人要求把下一次追蹤排進行程。"
+        }
+        (0, StoryDecision::Skipped) => {
+            "這份陳情沒有形成共同處理方案。陳秀惠仍把副本留在總部，候選人今天必須決定是否親自回覆。"
+        }
+        (1, StoryDecision::Chosen(StoryChoiceId::TrackProgress)) => {
+            "公開追蹤表開始更新，周以晴逐項核對期限；候選人知道承諾從此有了能被對照的日期。"
+        }
+        (1, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)) => {
+            "協調會結束後，居民與專業者仍有不同優先順序；候選人把未達共識的部分留在紀錄裡。"
+        }
+        (1, StoryDecision::Chosen(StoryChoiceId::JointOversight)) => {
+            "跨黨追蹤名單送到各組，吳明哲提醒候選人：列管能讓問題被看見，也會讓每次延誤都留下紀錄。"
+        }
+        (1, StoryDecision::Skipped) => {
+            "前次沒有決定後續追蹤方式，居民各自收到不同答案；候選人今天得先說清楚誰負責回覆。"
+        }
+        (2, StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline)) => {
+            "候選人把改善期限和仍待處理事項一併公開；陳秀惠收起清單前，先圈出下次檢視日期。"
+        }
+        (2, StoryDecision::Chosen(StoryChoiceId::ResidentReinspection)) => {
+            "居民代表與團隊走回現場，照片裡有改善，也有沒解決的地方；候選人沒有要求刪掉任何一張。"
+        }
+        (2, StoryDecision::Chosen(StoryChoiceId::PublishOpenItems)) => {
+            "候選人把尚未完成的項目列在聲明最前面；掌聲不多，但周以晴找不到被藏起來的空白。"
+        }
+        (2, StoryDecision::Skipped) => {
+            "最後一段陳情線沒有新的承諾，未完成事項仍留在桌上；選舉結束後，居民還會回來問進度。"
+        }
+        _ => return None,
+    })
+}
+
+pub fn ending_note(progress: StoryProgress) -> &'static str {
+    match (
+        progress.decision(0),
+        progress.decision(1),
+        progress.decision(2),
+    ) {
+        (
+            Some(StoryDecision::Chosen(StoryChoiceId::FieldVisit)),
+            Some(StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)),
+            Some(StoryDecision::Chosen(StoryChoiceId::ResidentReinspection)),
+        ) => "這條路線從現勘走到共同復勘。投票日結束後，居民留下的通報清單沒有被收進檔案櫃，而是交回下一個負責窗口。",
+        (
+            Some(StoryDecision::Chosen(StoryChoiceId::PublishFacts)),
+            Some(StoryDecision::Chosen(StoryChoiceId::TrackProgress)),
+            Some(StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline)),
+        ) => "這條路線把資訊公開、進度追蹤和期限接在一起。最後一次記者提問時，候選人仍把尚未完成的部分留在答案裡。",
+        (_, _, Some(StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline))) => {
+            "候選人以可查核的期限收尾；清單上仍有未完成項目，但每一項都有下一個回覆日期。"
+        }
+        (_, _, Some(StoryDecision::Chosen(StoryChoiceId::ResidentReinspection))) => {
+            "選前最後一次復勘由居民共同參與；競選團隊帶走的不只是照片，還有尚待處理的問題。"
+        }
+        (_, _, Some(StoryDecision::Chosen(StoryChoiceId::PublishOpenItems))) => {
+            "候選人公開未解事項，沒有把選前說明包裝成問題已經消失；團隊留下後續追蹤窗口。"
+        }
+        (_, _, Some(StoryDecision::Skipped)) => {
+            "最後一段故事沒有作出新承諾；前兩段留下的追蹤工作仍等待選後接手。"
+        }
+        _ => "這條故事線沒有走到最後一個選擇；留下的通報與待確認事項，仍是競選團隊需要交代的部分。",
+    }
+}
+
 pub fn choice_for(beat_index: usize, choice_index: usize) -> Option<&'static StoryChoiceSpec> {
     choices_for(beat_index)?.get(choice_index)
 }
@@ -391,5 +475,26 @@ mod tests {
             coherence_bonus(0, StoryChoiceId::FieldVisit, progress),
             StoryBonus::default()
         );
+    }
+
+    #[test]
+    fn candidate_daily_callbacks_and_ending_replay_the_chosen_route() {
+        let mut progress = StoryProgress::default();
+        assert!(daily_route_echo(3, 1, progress).is_none());
+        progress.record(0, StoryDecision::Chosen(StoryChoiceId::FieldVisit));
+        assert!(daily_route_echo(3, 1, progress)
+            .unwrap()
+            .contains("現勘紀錄"));
+        progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
+        assert!(daily_route_echo(7, 1, progress).unwrap().contains("協調會"));
+        progress.record(
+            2,
+            StoryDecision::Chosen(StoryChoiceId::ResidentReinspection),
+        );
+        assert!(daily_route_echo(11, 1, progress)
+            .unwrap()
+            .contains("共同參與"));
+        assert!(ending_note(progress).contains("共同復勘"));
+        assert!(daily_route_echo(11, 2, progress).is_none());
     }
 }

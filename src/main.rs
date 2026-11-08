@@ -13,7 +13,10 @@ use project_twn::staffer::{
     continuity_bonus as staffer_continuity_bonus, daily_route_echo as staffer_daily_route_echo,
     daily_scene as staffer_daily_scene,
 };
-use project_twn::story::coherence_bonus;
+use project_twn::story::{
+    coherence_bonus, daily_route_echo as candidate_daily_route_echo,
+    ending_note as candidate_story_ending_note,
+};
 use project_twn::strategy::{
     StrategyAxis, StrategyEngine, StrategyProfile, StrategyRecommendation,
 };
@@ -225,6 +228,8 @@ fn run() -> Result<(), String> {
     let result = print_final(&mut game);
     if options.staffer_mode {
         print_staffer_summary(&game);
+    } else {
+        print_candidate_story_summary(&game);
     }
     if let Some(path) = options.log.as_deref() {
         save_campaign_log(
@@ -566,6 +571,11 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
     print_player_assignment(game);
     if staffer_mode {
         println!("遊戲模式：幕僚模式｜你是虛構競選團隊的幕僚，負責設定主軸、處理陳情與事件、協調地方網絡、檢視支持度並安排最後布局。每兩週一次幕僚會議，不占用每日行動，但會消耗部分競選資源；本模式以專屬情節取代一般模式支線，避免同時觸發重複陳情故事。\n");
+    } else {
+        println!(
+            "遊戲模式：候選人模式｜你親自扮演候選人 {}，每天安排選戰行動，並在多週故事中作出取捨；行程敘事會回應已選路線與當日行動。\n",
+            game.candidates[game.player_index].name
+        );
     }
     if let Some(region) = game.region {
         println!(
@@ -729,9 +739,7 @@ fn run_interactive(
         if let Some(event) = game.current_event() {
             println!("議題焦點：{} — {}", event.title, event.description);
         }
-        if staffer_mode {
-            print_staffer_daily_scene(game);
-        }
+        print_campaign_daily_scene(game, staffer_mode);
         if let Some(objective) = game.current_objective() {
             let progress = game.current_objective_progress();
             let target = objective.target_actions;
@@ -940,23 +948,33 @@ fn print_staffer_poll_brief(game: &GameState) {
     }
 }
 
-fn print_staffer_daily_scene(game: &GameState) {
+fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
     let week = game.round + 1;
     let day = game.day + 1;
     if let Some((arc, scene)) = staffer_daily_scene(week, day) {
-        println!("\n【今日選戰｜第 {week} 週・第 {day} 天｜{arc}】{scene}");
+        if staffer_mode {
+            println!("\n【今日選戰｜第 {week} 週・第 {day} 天｜{arc}】{scene}");
+        } else {
+            let candidate_name = &game.candidates[game.player_index].name;
+            println!("\n【候選人行程｜{candidate_name}｜第 {week} 週・第 {day} 天｜{arc}】{scene}");
+        }
     }
-    if let Some(echo) = staffer_daily_route_echo(week, day, game.staffer_progress) {
-        println!("劇情延續：{echo}");
+    let route_echo = if staffer_mode {
+        staffer_daily_route_echo(week, day, game.staffer_progress)
+    } else {
+        candidate_daily_route_echo(week, day, game.story_progress)
+    };
+    if let Some(echo) = route_echo {
+        println!("劇情回聲：{echo}");
     }
-    if game.day == 0 {
+    if staffer_mode && game.day == 0 {
         let reminder = match game.side {
             Side::Incumbent => "執政方幕僚備忘：清楚區分已完成、進行中與超出權責的承諾。",
             Side::Challenger => "在野方幕僚備忘：每項監督或批評都要接上替代方案、時程與資源來源。",
         };
         println!("{reminder}");
     }
-    if day == 1 || day == 7 {
+    if staffer_mode && (day == 1 || day == 7) {
         if let Some(focus) = game.staffer_progress.focus() {
             println!(
                 "幕僚主軸回扣：{}；若今天改變訊息，記得向團隊交代原因。",
@@ -996,6 +1014,15 @@ fn print_staffer_summary(game: &GameState) {
         game.staffer_progress.summary()
     );
     println!("{}", game.staffer_progress.ending_note());
+}
+
+fn print_candidate_story_summary(game: &GameState) {
+    println!(
+        "候選人劇情回顧：完成 {}／3 段；決策路線：{}",
+        game.story_progress.completed_beats(),
+        game.story_progress.summary()
+    );
+    println!("{}", candidate_story_ending_note(game.story_progress));
 }
 
 fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
@@ -1204,8 +1231,8 @@ fn run_auto_mode(
 ) -> AutoRunSummary {
     let mut summary = AutoRunSummary::default();
     while !game.is_finished() {
-        if staffer_mode && show_progress {
-            print_staffer_daily_scene(game);
+        if show_progress {
+            print_campaign_daily_scene(game, staffer_mode);
         }
         if staffer_mode {
             if let Some(brief) = game.current_staffer_brief() {
@@ -2067,6 +2094,17 @@ fn print_action_outcome(
             );
         }
         println!("  劇情推進：{}", staffer_action_reaction(outcome));
+    } else {
+        if let Some(response) = &outcome.rival_response {
+            println!(
+                "  對手回應（遊戲模型）：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點）。",
+                response.candidate_name,
+                response.share_before,
+                response.share_after,
+                response.share_after - response.share_before
+            );
+        }
+        println!("  候選人劇情：{}", candidate_action_reaction(outcome));
     }
     if outcome.day == DAYS_PER_WEEK {
         print_poll_table(game);
@@ -2122,6 +2160,55 @@ fn staffer_action_reaction(outcome: &project_twn::sim::ActionOutcome) -> &'stati
         RestAndPrepare => "總部暫時關掉一半燈光，候選人補足體力，幕僚留下來整理明天必須回覆的問題。",
         FabricatedPoll | AnonymousSmear | CoordinatedOpinionWar => {
             "查核尚未確認來源，團隊沒有把暫時無事當成安全；完整紀錄已交由負責人保全。"
+        }
+    }
+}
+
+fn candidate_action_reaction(outcome: &project_twn::sim::ActionOutcome) -> &'static str {
+    use ActionId::*;
+
+    if outcome.negative_tactic_detected {
+        return "記者會上，查核團體播出完整紀錄；你原想掌握的議題被迫讓位給道歉與說明，團隊連夜重排行程。";
+    }
+    match outcome.id {
+        CampaignHeadquarters => match outcome.week {
+            1..=3 => "你站在新成立的總部門口，看著行程表第一次貼滿整面牆；林予安提醒，真正的考驗是每張承諾都有人追進度。",
+            _ => "你走進才剛整理好的總部，發現對手早已跑完幾輪地方行程；團隊得用更精準的排程追回時間。",
+        },
+        SupportersAssociation => "後援會把第一批聯絡名單交到你手上；其中有熱情支持者，也有等著你回覆的陳情人。",
+        VolunteerCanvassing | GroundTeamLeaflets | StreetSweep | TurnoutMobilization => {
+            if outcome.week >= 9 {
+                "最後一輪掃街結束，你聽見支持者問投票交通，也聽見還沒決定的人追問政見；兩種聲音都進了回報表。"
+            } else {
+                "路口行程結束，你把居民追問記在袖珍筆記本裡；轉角處，方致遠的團隊正架起另一個宣傳點。"
+            }
+        }
+        CommunityTour | LegalAssembly | ReligiousCommunityVisit | PilgrimageParticipation | MassAttendance => {
+            "拜會結束，地方夥伴沒有替你背書，只要求公開共同關心的事與彼此不同的立場；鏡頭收起後，談話才真正開始。"
+        }
+        VulnerableCommunityCare | DisasterResponseVisit | PublicServices | CrisisResponse => {
+            "你先聽完現場需求才接受媒體訪問；仍有個案等候處理，團隊把後續聯絡窗口一併公布。"
+        }
+        PolicyDelivery | PolicyForum | PolicyPresentation | Debate => {
+            if outcome.week >= 9 {
+                "政見回答被剪成短片傳開，周以晴仍在台下追問成本與期限；你把完整資料和未完成項目一起交給媒體。"
+            } else {
+                "政策組把成本表推到你面前，記者已經準備追問財源；你得在簡短答覆和完整交代之間找到節奏。"
+            }
+        }
+        TransparencyReport | PublicMessage | MediaInterview | FactCheckResponse | OversightPetition => {
+            "周以晴把查證結果和待確認欄位並排刊出；你可以更正錯誤，但不能只挑有利的一半回答。"
+        }
+        CoalitionTalks | PollCoordination => {
+            if outcome.coordination_note.is_some() {
+                "協調結果傳回總部，合作方保留自己的招牌與主張；你知道共同出席不等於所有分歧都已消失。"
+            } else {
+                "協商沒有立即定案。你把下一次會談留在行事曆，並請團隊先寫清楚雙方不能退讓的條件。"
+            }
+        }
+        RestAndPrepare => "你離開鏡頭休息一段時間，幕僚留下來整理明天的提問；候選人的體力也是這場選戰的資源。",
+        FabricatedPoll | AnonymousSmear | CoordinatedOpinionWar => {
+            "目前沒有查核揭露，但周以晴已要求提供來源；你知道這條捷徑可能在下一個新聞週期反噬。"
         }
     }
 }
