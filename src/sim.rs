@@ -4,6 +4,9 @@ use crate::history::{
     party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
     VOTER_SEGMENTS,
 };
+use crate::story::{
+    beat_for_round, choice_for, coherence_bonus, StoryBeat, StoryDecision, StoryProgress,
+};
 use std::fmt;
 
 pub const CAMPAIGN_ROUNDS: u8 = 12;
@@ -28,6 +31,7 @@ pub enum GameError {
     CoalitionAlreadyUsed,
     HeadquartersAlreadyEstablished,
     SupportersAssociationAlreadyEstablished,
+    StoryChoiceUnavailable,
 }
 
 impl fmt::Display for GameError {
@@ -50,6 +54,9 @@ impl fmt::Display for GameError {
             }
             Self::SupportersAssociationAlreadyEstablished => {
                 formatter.write_str("後援會已成立；每場戰役只能成立一次。")
+            }
+            Self::StoryChoiceUnavailable => {
+                formatter.write_str("目前沒有可處理的故事情境，或所選解法無效。")
             }
         }
     }
@@ -1031,6 +1038,7 @@ pub struct GameState {
     matched_events: u8,
     pub poll_taken_this_week: bool,
     pub coalition_this_week: bool,
+    pub story_progress: StoryProgress,
     final_outcome: Option<ElectionOutcome>,
     rng: Rng,
 }
@@ -1064,6 +1072,20 @@ pub struct ActionOutcome {
     pub objective_reward: i32,
     pub week: u8,
     pub day: u8,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoryOutcome {
+    pub title: &'static str,
+    pub choice_label: &'static str,
+    pub support_before: f64,
+    pub support_after: f64,
+    pub support_delta: f64,
+    pub trust_after: f64,
+    pub mobilization_after: f64,
+    pub stamina_after: f64,
+    pub budget_after: i32,
+    pub note: Option<&'static str>,
 }
 
 /// A deterministic, one-step estimate of an action before seeded noise is drawn.
@@ -1398,6 +1420,7 @@ impl GameState {
             matched_events: 0,
             poll_taken_this_week: false,
             coalition_this_week: false,
+            story_progress: StoryProgress::default(),
             final_outcome: None,
             rng,
         }
@@ -1418,6 +1441,78 @@ impl GameState {
 
     pub fn current_objective_progress(&self) -> u8 {
         self.weekly_objective_progress
+    }
+
+    pub fn current_story_beat(&self) -> Option<StoryBeat> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS {
+            return None;
+        }
+        beat_for_round(self.round, self.story_progress)
+    }
+
+    /// Resolve an optional story choice without consuming one of the 84 daily turns.
+    pub fn apply_story_choice(&mut self, choice_index: usize) -> Result<StoryOutcome, GameError> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS {
+            return Err(GameError::StoryChoiceUnavailable);
+        }
+        let beat = self
+            .current_story_beat()
+            .ok_or(GameError::StoryChoiceUnavailable)?;
+        let choice =
+            *choice_for(beat.index, choice_index).ok_or(GameError::StoryChoiceUnavailable)?;
+        if self.budget < choice.budget_cost {
+            return Err(GameError::InsufficientBudget {
+                required: choice.budget_cost,
+                available: self.budget,
+            });
+        }
+        let bonus = coherence_bonus(beat.index, choice.id, self.story_progress);
+        let support_before = self.polls[self.player_index];
+        if !self
+            .story_progress
+            .record(beat.index, StoryDecision::Chosen(choice.id))
+        {
+            return Err(GameError::StoryChoiceUnavailable);
+        }
+        self.budget -= choice.budget_cost;
+        self.apply_segment_swing(
+            self.player_index,
+            choice.support_delta + bonus.support_delta,
+            &[],
+        );
+        self.trust = (self.trust + choice.trust_delta + bonus.trust_delta).clamp(0.0, 100.0);
+        self.turnout_momentum =
+            (self.turnout_momentum + choice.mobilization_delta).clamp(0.0, 100.0);
+        self.stamina = (self.stamina + choice.stamina_delta).clamp(0.0, 100.0);
+        let support_after = self.polls[self.player_index];
+        Ok(StoryOutcome {
+            title: beat.title,
+            choice_label: choice.label,
+            support_before,
+            support_after,
+            support_delta: support_after - support_before,
+            trust_after: self.trust,
+            mobilization_after: self.turnout_momentum,
+            stamina_after: self.stamina,
+            budget_after: self.budget,
+            note: bonus.note,
+        })
+    }
+
+    pub fn skip_story_beat(&mut self) -> Result<(), GameError> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS {
+            return Err(GameError::StoryChoiceUnavailable);
+        }
+        let beat = self
+            .current_story_beat()
+            .ok_or(GameError::StoryChoiceUnavailable)?;
+        if !self
+            .story_progress
+            .record(beat.index, StoryDecision::Skipped)
+        {
+            return Err(GameError::StoryChoiceUnavailable);
+        }
+        Ok(())
     }
 
     fn action_spec(&self, id: ActionId) -> Result<ActionSpec, GameError> {
@@ -2037,6 +2132,11 @@ impl GameState {
         }
         if self.round == CAMPAIGN_ROUNDS && self.day != 0 {
             return Err("a completed campaign must be at the first day boundary");
+        }
+        if !self.story_progress.is_valid(self.round) {
+            return Err(
+                "story choices must follow the campaign schedule and their valid choice sets",
+            );
         }
         match self.setup.timeline {
             EventTimeline::SeededWeekly => {
@@ -2930,5 +3030,52 @@ mod tests {
         assert_eq!(caught.0.sanctioned_funds, caught.1.sanction_fine);
         assert!(caught.1.tactic_note.is_some());
         assert!(caught.0.validate().is_ok());
+    }
+
+    #[test]
+    fn story_choices_resolve_at_scheduled_weeks_without_consuming_a_day() {
+        let mut game = GameState::new(2024, Side::Challenger, 904);
+        assert!(game.current_story_beat().is_none());
+        for _ in 0..DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        let beat = game.current_story_beat().unwrap();
+        assert_eq!(beat.week, 2);
+        assert!(beat.scene.contains("豪雨"));
+
+        let day_before = game.day;
+        let round_before = game.round;
+        let outcome = game.apply_story_choice(1).unwrap();
+        assert!(outcome.support_delta > 0.0);
+        assert_eq!(game.day, day_before);
+        assert_eq!(game.round, round_before);
+        assert_eq!(game.story_progress.completed_beats(), 1);
+        assert!(game.current_story_beat().is_none());
+        assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn story_choices_check_budget_and_skips_keep_the_chain_moving() {
+        let mut game = GameState::new(2024, Side::Challenger, 905);
+        for _ in 0..DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        game.budget = 0;
+        let polls_before = game.polls.clone();
+        assert!(matches!(
+            game.apply_story_choice(0),
+            Err(GameError::InsufficientBudget { .. })
+        ));
+        assert_eq!(game.polls, polls_before);
+        assert_eq!(game.story_progress.completed_beats(), 0);
+        game.skip_story_beat().unwrap();
+        assert_eq!(game.story_progress.summary(), "skip>pending>pending");
+        for _ in 0..4 * DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        let next = game.current_story_beat().unwrap();
+        assert_eq!(next.week, 6);
+        assert!(next.scene.contains("前次暫未處理"));
+        assert!(game.validate().is_ok());
     }
 }

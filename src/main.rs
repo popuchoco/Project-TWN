@@ -5,9 +5,11 @@ use project_twn::history::{
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState, ModelParameters,
-    SensitivityParameter, Side, TacticCategory, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+    ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameError, GameState,
+    ModelParameters, SensitivityParameter, Side, StoryOutcome, TacticCategory, CAMPAIGN_ROUNDS,
+    DAYS_PER_WEEK,
 };
+use project_twn::story::coherence_bonus;
 use project_twn::strategy::{
     StrategyAxis, StrategyEngine, StrategyProfile, StrategyRecommendation,
 };
@@ -17,8 +19,8 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
-const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition\tdifficulty\tevent_pack\ttimeline";
+const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline\tstory_path";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition\tdifficulty\tevent_pack\ttimeline\tstory_path";
 const MAX_BATCH_RUNS: u32 = 10_000;
 const MAX_STRATEGY_SWEEP_RUNS: u32 = 1_000;
 const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
@@ -626,7 +628,7 @@ fn print_poll_table(game: &GameState) {
 
 fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<(), String> {
     let engine = StrategyEngine::new(strategy);
-    while !game.is_finished() {
+    'campaign: while !game.is_finished() {
         println!(
             "\n--- 第 {} / {} 週・第 {} / {} 天｜{} ---",
             game.round + 1,
@@ -668,6 +670,53 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
                 objective.title, bar, progress, target, objective.description
             );
         }
+        if let Some(beat) = game.current_story_beat() {
+            println!("\n【多週情境｜第 {} 週】{}", beat.week, beat.title);
+            println!("登場人物：{}", beat.character);
+            println!("{}", beat.scene);
+            println!("（人物與情境為虛構合成素材；選擇會改變遊戲資源與支持度，不耗用每日行動。）");
+            loop {
+                for (index, choice) in beat.choices.iter().enumerate() {
+                    println!(
+                        "  {}) {}｜預算 {}｜支持 {:+.2}｜信任 {:+.1}｜動員 {:+.1}｜體力 {:+.1}{}",
+                        index + 1,
+                        choice.label,
+                        choice.budget_cost,
+                        choice.support_delta,
+                        choice.trust_delta,
+                        choice.mobilization_delta,
+                        choice.stamina_delta,
+                        if choice.budget_cost > game.budget {
+                            "（預算不足）"
+                        } else {
+                            ""
+                        }
+                    );
+                    println!("     {}", choice.description);
+                }
+                let Some(selection) = select_story_choice(beat.choices.len())? else {
+                    break 'campaign;
+                };
+                if selection == 0 {
+                    game.skip_story_beat().map_err(|error| error.to_string())?;
+                    println!("本段情境暫不處理；後續故事仍會依目前進度展開。\n");
+                    break;
+                }
+                match game.apply_story_choice(selection - 1) {
+                    Ok(outcome) => {
+                        print_story_outcome(&outcome);
+                        break;
+                    }
+                    Err(error @ GameError::InsufficientBudget { .. }) => {
+                        println!("{error}\n請改選其他解法或暫不處理。\n");
+                    }
+                    Err(error) => {
+                        println!("{error}\n");
+                        break;
+                    }
+                }
+            }
+        }
         let recommendations = engine.rank_actions(game);
         let selected = select_interactive_action(&recommendations)?;
         let Some(action_id) = selected else {
@@ -679,6 +728,45 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
         }
     }
     Ok(())
+}
+
+fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
+    loop {
+        print!("選擇解法（1–{choice_count}，0 暫不處理，q 結束本場）：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        let value = input.trim();
+        if value.eq_ignore_ascii_case("q") {
+            return Ok(None);
+        }
+        if let Ok(selection) = value.parse::<usize>() {
+            if selection <= choice_count {
+                return Ok(Some(selection));
+            }
+        }
+        println!("請輸入有效的選項、0 或 q。\n");
+    }
+}
+
+fn print_story_outcome(outcome: &StoryOutcome) {
+    println!(
+        "✓ {}｜{}：支持度 {:.2}% → {:.2}%（{:+.2} 點），信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
+        outcome.title,
+        outcome.choice_label,
+        outcome.support_before,
+        outcome.support_after,
+        outcome.support_delta,
+        outcome.trust_after,
+        outcome.mobilization_after,
+        outcome.stamina_after,
+        outcome.budget_after
+    );
+    if let Some(note) = outcome.note {
+        println!("  {note}");
+    }
 }
 
 fn select_interactive_action(
@@ -837,6 +925,35 @@ fn run_auto(
     let engine = StrategyEngine::new(strategy);
     let mut summary = AutoRunSummary::default();
     while !game.is_finished() {
+        if let Some(beat) = game.current_story_beat() {
+            let selected = beat
+                .choices
+                .iter()
+                .enumerate()
+                .filter(|(_, choice)| choice.budget_cost <= game.budget)
+                .max_by(|(_, left), (_, right)| {
+                    let score = |choice: &project_twn::story::StoryChoiceSpec| {
+                        let bonus = coherence_bonus(beat.index, choice.id, game.story_progress);
+                        choice.support_delta * 3.0
+                            + (choice.trust_delta + bonus.trust_delta) * 0.08
+                            + choice.mobilization_delta * 0.05
+                            + choice.stamina_delta * 0.02
+                            - f64::from(choice.budget_cost) * 0.12
+                            + bonus.support_delta * 3.0
+                    };
+                    score(left).total_cmp(&score(right))
+                })
+                .map(|(index, _)| index);
+            if let Some(index) = selected {
+                if let Ok(outcome) = game.apply_story_choice(index) {
+                    if show_progress {
+                        print_story_outcome(&outcome);
+                    }
+                }
+            } else {
+                let _ = game.skip_story_beat();
+            }
+        }
         let Some(recommendation) = engine.rank_actions(game).into_iter().next() else {
             break;
         };
@@ -878,6 +995,7 @@ struct BatchRecord {
     trust: f64,
     mobilization: f64,
     scorecard: CampaignScorecard,
+    story_path: String,
 }
 
 #[derive(Clone, Copy)]
@@ -1058,6 +1176,7 @@ fn simulate_batch_record(
         trust: game.trust,
         mobilization: game.turnout_momentum,
         scorecard: game.scorecard(),
+        story_path: game.story_progress.summary(),
     }
 }
 
@@ -1533,6 +1652,7 @@ fn save_batch_log(
         cells.push(options.setup.difficulty.key().to_string());
         cells.push(options.setup.event_pack.key().to_string());
         cells.push(options.setup.timeline.key().to_string());
+        cells.push(record.story_path.clone());
         writeln!(file, "{}", cells.join("\t")).map_err(|error| error.to_string())?;
     }
     file.flush().map_err(|error| error.to_string())?;
@@ -1788,7 +1908,7 @@ fn save_campaign_log(
     let review = game.scorecard();
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}\t{}\t{}",
         game.campaign_year,
         if game.region.is_some() {
             "local"
@@ -1816,7 +1936,8 @@ fn save_campaign_log(
         game.sanctioned_funds,
         game.setup.difficulty.key(),
         game.setup.event_pack.key(),
-        game.setup.timeline.key()
+        game.setup.timeline.key(),
+        game.story_progress.summary()
     )
     .map_err(|error| error.to_string())?;
     file.flush().map_err(|error| error.to_string())?;

@@ -40,7 +40,7 @@ jobs:
           $rows = @(Get-Content target/ci-batch-runs.tsv)
           if ($rows.Count -ne 9) { throw "Expected a header and 8 style/seed rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 44) { throw "Unexpected batch TSV column count." }
+            if ($row.Split("`t").Count -ne 45) { throw "Unexpected batch TSV column count." }
           }
 
       - name: Smoke-test paired parameter sensitivity
@@ -49,7 +49,7 @@ jobs:
           $rows = @(Get-Content target/ci-sensitivity-runs.tsv)
           if ($rows.Count -ne 31) { throw "Expected a header and 30 one-factor rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 44) { throw "Unexpected sensitivity TSV column count." }
+            if ($row.Split("`t").Count -ne 45) { throw "Unexpected sensitivity TSV column count." }
           }
 
       - name: Smoke-test paired parameter interaction sensitivity
@@ -58,7 +58,7 @@ jobs:
           $rows = @(Get-Content target/ci-interaction-runs.tsv)
           if ($rows.Count -ne 85) { throw "Expected a header and 84 two-factor corner rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 44) { throw "Unexpected interaction TSV column count." }
+            if ($row.Split("`t").Count -ne 45) { throw "Unexpected interaction TSV column count." }
           }
 
       - name: Smoke-test strategy profile comparison
@@ -67,7 +67,7 @@ jobs:
           $rows = @(Get-Content target/ci-strategy-runs.tsv)
           if ($rows.Count -ne 8) { throw "Expected a header and 7 strategy rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 44) { throw "Unexpected strategy TSV column count." }
+            if ($row.Split("`t").Count -ne 45) { throw "Unexpected strategy TSV column count." }
           }
           $headers = $rows[0].Split("`t")
           $positiveIndex = [Array]::IndexOf($headers, "positive_actions")
@@ -105,7 +105,19 @@ jobs:
           $rows = @(Get-Content target/ci-config.tsv)
           $headers = $rows[0].Split("`t")
           $values = $rows[1].Split("`t")
-          if ($rows.Count -ne 2 -or $values.Count -ne 44) { throw "Campaign setup smoke test has unexpected output shape." }
+          if ($rows.Count -ne 2 -or $values.Count -ne 45) { throw "Campaign setup smoke test has unexpected output shape." }
           if ($values[[Array]::IndexOf($headers, "difficulty")] -ne "hard") { throw "Difficulty was not recorded." }
           if ($values[[Array]::IndexOf($headers, "event_pack")] -ne "democracy") { throw "Event pack was not recorded." }
           if ($values[[Array]::IndexOf($headers, "timeline")] -ne "date") { throw "Timeline was not recorded." }
+
+      - name: Smoke-test story path and campaign TSV
+        run: |
+          cargo run -- --year 2024 --role challenger --auto --seed 7 --log target/ci-story.tsv | Out-File -Encoding utf8 target/ci-story-output.txt
+          $rows = @(Get-Content target/ci-story.tsv)
+          if ($rows.Count -ne 2) { throw "Expected one campaign record and one header." }
+          $headers = $rows[0].Split("`t")
+          $values = $rows[1].Split("`t")
+          if ($values.Count -ne 22) { throw "Unexpected campaign TSV column count." }
+          $storyIndex = [Array]::IndexOf($headers, "story_path")
+          if ($storyIndex -lt 0 -or $values[$storyIndex] -notmatch ".+>.+>.+") { throw "Campaign log omitted the resolved story path." }
+          if (-not (Get-Content target/ci-story-output.txt -Raw).Contains("雨後一條路")) { throw "Automatic play omitted the story arc." }
