@@ -726,7 +726,7 @@ mod tests {
         let clip_opening = beat_for_round(3, progress).unwrap();
         assert_eq!(clip_opening.week, 4);
         assert_eq!(clip_opening.choices.len(), 3);
-        assert!(clip_opening.scene.contains("剪輯"));
+        assert!(clip_opening.scene.contains("剪成短片"));
         assert!(progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip)));
 
         let followup = beat_for_round(5, progress).unwrap();
