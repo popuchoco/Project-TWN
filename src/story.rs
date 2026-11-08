@@ -1,8 +1,8 @@
 //! Choice-driven campaign story content.
 //!
-//! The first story arc is a fictional composite scenario. It uses recurring
-//! characters and consequences as game material; it does not depict a single
-//! historical event or claim a fixed political effect.
+//! Story arcs are fictional composite scenarios. They use recurring characters
+//! and consequences as game material; they do not depict a single historical
+//! event or claim a fixed political effect.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoryChoiceId {
@@ -15,6 +15,15 @@ pub enum StoryChoiceId {
     VerifiedDeadline,
     ResidentReinspection,
     PublishOpenItems,
+    PublishFullClip,
+    CandidateInterview,
+    IgnoreClip,
+    PublishTimeline,
+    OpenQuestions,
+    SpokespersonBriefing,
+    DebateWithRecord,
+    InterviewAfterDebate,
+    PivotToTurnout,
 }
 
 impl StoryChoiceId {
@@ -29,6 +38,15 @@ impl StoryChoiceId {
             Self::VerifiedDeadline => "verified_deadline",
             Self::ResidentReinspection => "resident_reinspection",
             Self::PublishOpenItems => "publish_open_items",
+            Self::PublishFullClip => "publish_full_clip",
+            Self::CandidateInterview => "candidate_interview",
+            Self::IgnoreClip => "ignore_clip",
+            Self::PublishTimeline => "publish_timeline",
+            Self::OpenQuestions => "open_questions",
+            Self::SpokespersonBriefing => "spokesperson_briefing",
+            Self::DebateWithRecord => "debate_with_record",
+            Self::InterviewAfterDebate => "interview_after_debate",
+            Self::PivotToTurnout => "pivot_to_turnout",
         }
     }
 }
@@ -41,7 +59,7 @@ pub enum StoryDecision {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StoryProgress {
-    decisions: [Option<StoryDecision>; 3],
+    decisions: [Option<StoryDecision>; 6],
 }
 
 impl StoryProgress {
@@ -80,7 +98,7 @@ impl StoryProgress {
     }
 
     pub(crate) fn is_valid(self, round: u8) -> bool {
-        let trigger_rounds = [1_u8, 5, 9];
+        let trigger_rounds = [1_u8, 3, 5, 7, 9, 11];
         for (index, decision) in self.decisions.iter().enumerate() {
             if decision.is_some() && round < trigger_rounds[index] {
                 return false;
@@ -229,18 +247,127 @@ const CLOSING_CHOICES: &[StoryChoiceSpec] = &[
     },
 ];
 
+const CLIP_OPENING_CHOICES: &[StoryChoiceSpec] = &[
+    StoryChoiceSpec {
+        id: StoryChoiceId::PublishFullClip,
+        label: "公開完整影像、逐字稿與拍攝脈絡",
+        description: "一次提供可核對材料；整理成本較高，但讓外界自行比對前後文。",
+        budget_cost: 2,
+        support_delta: 0.06,
+        trust_delta: 1.8,
+        mobilization_delta: 0.2,
+        stamina_delta: -1.5,
+    },
+    StoryChoiceSpec {
+        id: StoryChoiceId::CandidateInterview,
+        label: "由候選人接受即時專訪說明",
+        description: "直接回答追問、掌握發言節奏；能即時釐清疑問，但需要更多體力面對追問。",
+        budget_cost: 1,
+        support_delta: 0.10,
+        trust_delta: 0.8,
+        mobilization_delta: 0.1,
+        stamina_delta: -3.0,
+    },
+    StoryChoiceSpec {
+        id: StoryChoiceId::IgnoreClip,
+        label: "暫不回應，先把行程留給地方組織",
+        description: "把資源留在地面動員；議題熱度可能自行下降，也可能留下未回覆的空白。",
+        budget_cost: 0,
+        support_delta: 0.02,
+        trust_delta: -0.8,
+        mobilization_delta: 1.0,
+        stamina_delta: -0.5,
+    },
+];
+
+const CLIP_FOLLOWUP_CHOICES: &[StoryChoiceSpec] = &[
+    StoryChoiceSpec {
+        id: StoryChoiceId::PublishTimeline,
+        label: "公布時間軸、原始來源與查證進度",
+        description: "把可確認的來源、時間與待查點分開列出；透明度提高，但也會留下可供檢驗的紀錄。",
+        budget_cost: 2,
+        support_delta: 0.07,
+        trust_delta: 1.8,
+        mobilization_delta: 0.0,
+        stamina_delta: -1.5,
+    },
+    StoryChoiceSpec {
+        id: StoryChoiceId::OpenQuestions,
+        label: "安排公開問答，接受不同立場追問",
+        description: "讓記者與支持者都能提問；對話有機會解除疑慮，也會消耗候選人體力。",
+        budget_cost: 1,
+        support_delta: 0.08,
+        trust_delta: 1.0,
+        mobilization_delta: 0.2,
+        stamina_delta: -3.0,
+    },
+    StoryChoiceSpec {
+        id: StoryChoiceId::SpokespersonBriefing,
+        label: "由發言人統一說明並更新查核結果",
+        description: "降低候選人行程負擔，維持單一資訊窗口；若說明不完整，仍可能被追問。",
+        budget_cost: 1,
+        support_delta: 0.04,
+        trust_delta: 0.6,
+        mobilization_delta: 0.4,
+        stamina_delta: -0.5,
+    },
+];
+
+const CLIP_CLOSING_CHOICES: &[StoryChoiceSpec] = &[
+    StoryChoiceSpec {
+        id: StoryChoiceId::DebateWithRecord,
+        label: "帶著完整紀錄在辯論會正面回應",
+        description: "把來源與前後文帶上公開舞臺；若先前已公開查證脈絡，回應更連貫。",
+        budget_cost: 2,
+        support_delta: 0.09,
+        trust_delta: 1.5,
+        mobilization_delta: 0.2,
+        stamina_delta: -2.5,
+    },
+    StoryChoiceSpec {
+        id: StoryChoiceId::InterviewAfterDebate,
+        label: "辯論後再接受專訪，逐題補充說明",
+        description: "用較長篇幅處理仍有疑問的部分；溝通時間增加，也會壓縮最後衝刺安排。",
+        budget_cost: 1,
+        support_delta: 0.07,
+        trust_delta: 1.2,
+        mobilization_delta: 0.1,
+        stamina_delta: -2.0,
+    },
+    StoryChoiceSpec {
+        id: StoryChoiceId::PivotToTurnout,
+        label: "停止延長攻防，把資源轉回催票",
+        description: "尊重已完成的說明、集中最後動員；保留部分選民仍待自行判斷的空間。",
+        budget_cost: 0,
+        support_delta: 0.03,
+        trust_delta: 0.2,
+        mobilization_delta: 1.0,
+        stamina_delta: -0.5,
+    },
+];
+
 pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
-    let (index, week, character, scene, choices) = match round {
+    let (index, week, title, character, scene, choices) = match round {
         1 => (
             0,
             2,
+            "雨後一條路：陳情、查證與回覆",
             "陳秀惠（虛構里民代表）",
             "一場豪雨後，幾個路口積水，公車也得臨時改道。里民代表陳秀惠帶來通報清單；競選幕僚林予安請團隊決定先從哪裡著手。",
             OPENING_CHOICES,
         ),
-        5 => (
+        3 => (
             1,
+            4,
+            "一句話之後：剪輯、查證與信任",
+            "林予安（虛構競選幕僚）",
+            "一段候選人在公開論壇的發言被剪成短片，片段開始在社群流傳；原始錄影仍在主辦單位手上，團隊收到多方詢問。候選人必須決定先拿出什麼、又要如何面對追問。",
+            CLIP_OPENING_CHOICES,
+        ),
+        5 => (
+            2,
             6,
+            "雨後一條路：陳情、查證與回覆",
             "周以晴（虛構地方記者）",
             match progress.decision(0) {
                 Some(StoryDecision::Chosen(StoryChoiceId::FieldVisit)) => {
@@ -259,11 +386,34 @@ pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
             },
             FOLLOWUP_CHOICES,
         ),
-        9 => (
-            2,
-            10,
-            "陳秀惠（虛構里民代表）",
+        7 => (
+            3,
+            8,
+            "一句話之後：剪輯、查證與信任",
+            "周以晴（虛構地方記者）",
             match progress.decision(1) {
+                Some(StoryDecision::Chosen(StoryChoiceId::PublishFullClip)) => {
+                    "完整影像與逐字稿已公開，但不同媒體對關鍵段落仍有不同解讀。周以晴帶著時間碼回到總部，追問團隊能否交代查證流程。"
+                }
+                Some(StoryDecision::Chosen(StoryChoiceId::CandidateInterview)) => {
+                    "候選人接受專訪後，部分疑問獲得回答，另一些片段又被拆成新的短影音。周以晴希望團隊說明哪些資訊可以由原始紀錄核對。"
+                }
+                Some(StoryDecision::Chosen(StoryChoiceId::IgnoreClip)) => {
+                    "短片熱度稍退，然而地方座談仍有人提起。周以晴詢問候選人：這是已經說明過的議題，還是團隊決定不再回應？"
+                }
+                Some(StoryDecision::Skipped) => {
+                    "團隊前次沒有選擇回應方式，片段仍在流傳。周以晴帶來新的查證問題，候選人需要決定是否建立公開說明的節奏。"
+                }
+                _ => "原始影像仍待確認，周以晴帶著新的時間碼與問題來訪；團隊必須決定如何讓外界追蹤查證進度。",
+            },
+            CLIP_FOLLOWUP_CHOICES,
+        ),
+        9 => (
+            4,
+            10,
+            "雨後一條路：陳情、查證與回覆",
+            "陳秀惠（虛構里民代表）",
+            match progress.decision(2) {
                 Some(StoryDecision::Chosen(StoryChoiceId::TrackProgress)) => {
                     "公開追蹤表已有幾項進度，仍有工程尚未完成。投票日前，陳秀惠希望團隊把期限和未解事項交代清楚。"
                 }
@@ -280,6 +430,28 @@ pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
             },
             CLOSING_CHOICES,
         ),
+        11 => (
+            5,
+            12,
+            "一句話之後：剪輯、查證與信任",
+            "陳秀惠（虛構里民代表）",
+            match progress.decision(3) {
+                Some(StoryDecision::Chosen(StoryChoiceId::PublishTimeline)) => {
+                    "查證時間軸已更新，仍有少數來源等待回覆。投票日前最後一場辯論將再次談到這段影片，陳秀惠提醒團隊：公開紀錄也包括尚未確認的空白。"
+                }
+                Some(StoryDecision::Chosen(StoryChoiceId::OpenQuestions)) => {
+                    "公開問答留下逐題紀錄，現場有人認同、也有人仍有疑問。陳秀惠問候選人，最後一次回應要留在辯論會還是交給後續專訪。"
+                }
+                Some(StoryDecision::Chosen(StoryChoiceId::SpokespersonBriefing)) => {
+                    "發言人已整理說明稿，記者仍希望直接問候選人。陳秀惠提醒團隊，選民最後記住的可能不是聲明，而是候選人如何回答追問。"
+                }
+                Some(StoryDecision::Skipped) => {
+                    "團隊沒有建立固定的說明方式，辯論會前仍有選民詢問片段脈絡。陳秀惠希望候選人決定最後一週如何處理這些未解問題。"
+                }
+                _ => "辯論會前，片段的來源與脈絡仍是媒體提問焦點。陳秀惠希望候選人選擇一種能承擔後果的收尾方式。",
+            },
+            CLIP_CLOSING_CHOICES,
+        ),
         _ => return None,
     };
 
@@ -289,7 +461,7 @@ pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
     Some(StoryBeat {
         index,
         week,
-        title: "雨後一條路：陳情、查證與回覆",
+        title,
         character,
         scene,
         choices,
@@ -302,8 +474,11 @@ pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
 pub fn daily_route_echo(week: u8, day: u8, progress: StoryProgress) -> Option<&'static str> {
     let decision_index = match (week, day) {
         (3, 1) => 0,
-        (7, 1) => 1,
-        (11, 1) => 2,
+        (5, 1) => 1,
+        (7, 1) => 2,
+        (9, 1) => 3,
+        (11, 1) => 4,
+        (12, 2) => 5,
         _ => return None,
     };
     let decision = progress.decision(decision_index)?;
@@ -320,64 +495,130 @@ pub fn daily_route_echo(week: u8, day: u8, progress: StoryProgress) -> Option<&'
         (0, StoryDecision::Skipped) => {
             "這份陳情沒有形成共同處理方案。陳秀惠仍把副本留在總部，候選人今天必須決定是否親自回覆。"
         }
-        (1, StoryDecision::Chosen(StoryChoiceId::TrackProgress)) => {
-            "公開追蹤表開始更新，周以晴逐項核對期限；候選人知道承諾從此有了能被對照的日期。"
+        (1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip)) => {
+            "完整影像與逐字稿已交給查證小組，林予安提醒候選人：公開材料後，後續每個說法都要能對得上原始紀錄。"
         }
-        (1, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)) => {
-            "協調會結束後，居民與專業者仍有不同優先順序；候選人把未達共識的部分留在紀錄裡。"
+        (1, StoryDecision::Chosen(StoryChoiceId::CandidateInterview)) => {
+            "專訪播出後，候選人收到支持與質疑並存的回饋；林予安把尚未回答的問題排進下一次行程。"
         }
-        (1, StoryDecision::Chosen(StoryChoiceId::JointOversight)) => {
-            "跨黨追蹤名單送到各組，吳明哲提醒候選人：列管能讓問題被看見，也會讓每次延誤都留下紀錄。"
+        (1, StoryDecision::Chosen(StoryChoiceId::IgnoreClip)) => {
+            "團隊把行程留給地方組織，但周以晴仍在採訪群組追問片段脈絡；林予安把這項未答問題記進待辦。"
         }
         (1, StoryDecision::Skipped) => {
-            "前次沒有決定後續追蹤方式，居民各自收到不同答案；候選人今天得先說清楚誰負責回覆。"
+            "候選人沒有選擇回應方式，剪輯片段仍在流傳；總部開始收到需要逐一處理的查證問題。"
         }
-        (2, StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline)) => {
-            "候選人把改善期限和仍待處理事項一併公開；陳秀惠收起清單前，先圈出下次檢視日期。"
+        (2, StoryDecision::Chosen(StoryChoiceId::TrackProgress)) => {
+            "公開追蹤表開始更新，周以晴逐項核對期限；候選人知道承諾從此有了能被對照的日期。"
         }
-        (2, StoryDecision::Chosen(StoryChoiceId::ResidentReinspection)) => {
-            "居民代表與團隊走回現場，照片裡有改善，也有沒解決的地方；候選人沒有要求刪掉任何一張。"
+        (2, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)) => {
+            "協調會結束後，居民與專業者仍有不同優先順序；候選人把未達共識的部分留在紀錄裡。"
         }
-        (2, StoryDecision::Chosen(StoryChoiceId::PublishOpenItems)) => {
-            "候選人把尚未完成的項目列在聲明最前面；掌聲不多，但周以晴找不到被藏起來的空白。"
+        (2, StoryDecision::Chosen(StoryChoiceId::JointOversight)) => {
+            "跨黨追蹤名單送到各組，吳明哲提醒候選人：列管能讓問題被看見，也會讓每次延誤都留下紀錄。"
         }
         (2, StoryDecision::Skipped) => {
+            "前次沒有決定後續追蹤方式，居民各自收到不同答案；候選人今天得先說清楚誰負責回覆。"
+        }
+        (3, StoryDecision::Chosen(StoryChoiceId::PublishTimeline)) => {
+            "時間軸與查證進度上線，周以晴逐項核對來源；候選人要求團隊把仍待確認的地方也留在頁面上。"
+        }
+        (3, StoryDecision::Chosen(StoryChoiceId::OpenQuestions)) => {
+            "公開問答結束後，林予安整理出仍未解答的問題；候選人決定下一次不只回答熟悉的題目。"
+        }
+        (3, StoryDecision::Chosen(StoryChoiceId::SpokespersonBriefing)) => {
+            "發言人把統一說明送進媒體群組，候選人仍親自確認每一項可核對的事實，避免聲明超出資料範圍。"
+        }
+        (3, StoryDecision::Skipped) => {
+            "查證工作沒有固定更新節奏，外界各自拼湊片段；競選團隊仍可在最後一週選擇如何交代。"
+        }
+        (4, StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline)) => {
+            "候選人把改善期限和仍待處理事項一併公開；陳秀惠收起清單前，先圈出下次檢視日期。"
+        }
+        (4, StoryDecision::Chosen(StoryChoiceId::ResidentReinspection)) => {
+            "居民代表與團隊走回現場，照片裡有改善，也有沒解決的地方；候選人沒有要求刪掉任何一張。"
+        }
+        (4, StoryDecision::Chosen(StoryChoiceId::PublishOpenItems)) => {
+            "候選人把尚未完成的項目列在聲明最前面；掌聲不多，但周以晴找不到被藏起來的空白。"
+        }
+        (4, StoryDecision::Skipped) => {
             "最後一段陳情線沒有新的承諾，未完成事項仍留在桌上；選舉結束後，居民還會回來問進度。"
+        }
+        (5, StoryDecision::Chosen(StoryChoiceId::DebateWithRecord)) => {
+            "辯論會上，候選人把完整紀錄攤開逐點回應；結束後林予安把仍待查的問題交給資料團隊持續更新。"
+        }
+        (5, StoryDecision::Chosen(StoryChoiceId::InterviewAfterDebate)) => {
+            "候選人在辯論後接受專訪，沒有把不同意見說成已經消失；團隊把逐題說明留給選民自行檢視。"
+        }
+        (5, StoryDecision::Chosen(StoryChoiceId::PivotToTurnout)) => {
+            "最後幾天，團隊把人力轉回催票與交通安排；仍有選民保留疑問，候選人選擇讓紀錄而非新口號留下。"
+        }
+        (5, StoryDecision::Skipped) => {
+            "最後一場回應沒有安排，選戰轉入投票日準備；媒體與選民仍可依公開材料自行判讀。"
         }
         _ => return None,
     })
 }
 
-pub fn ending_note(progress: StoryProgress) -> &'static str {
-    match (
+pub fn ending_note(progress: StoryProgress) -> String {
+    let rain_ending = match (
         progress.decision(0),
-        progress.decision(1),
         progress.decision(2),
+        progress.decision(4),
     ) {
         (
             Some(StoryDecision::Chosen(StoryChoiceId::FieldVisit)),
             Some(StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)),
             Some(StoryDecision::Chosen(StoryChoiceId::ResidentReinspection)),
-        ) => "這條路線從現勘走到共同復勘。投票日結束後，居民留下的通報清單沒有被收進檔案櫃，而是交回下一個負責窗口。",
+        ) => "雨後陳情線：從現勘走到共同復勘，居民的通報清單交回下一個負責窗口。",
         (
             Some(StoryDecision::Chosen(StoryChoiceId::PublishFacts)),
             Some(StoryDecision::Chosen(StoryChoiceId::TrackProgress)),
             Some(StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline)),
-        ) => "這條路線把資訊公開、進度追蹤和期限接在一起。最後一次記者提問時，候選人仍把尚未完成的部分留在答案裡。",
+        ) => "雨後陳情線：資訊公開、進度追蹤和期限接在一起，尚未完成的部分仍保留在答案裡。",
         (_, _, Some(StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline))) => {
-            "候選人以可查核的期限收尾；清單上仍有未完成項目，但每一項都有下一個回覆日期。"
+            "雨後陳情線：候選人以可查核期限收尾，未完成項目都有下一個回覆日期。"
         }
         (_, _, Some(StoryDecision::Chosen(StoryChoiceId::ResidentReinspection))) => {
-            "選前最後一次復勘由居民共同參與；競選團隊帶走的不只是照片，還有尚待處理的問題。"
+            "雨後陳情線：居民共同參與最後一次復勘，團隊帶走改善紀錄與待處理問題。"
         }
         (_, _, Some(StoryDecision::Chosen(StoryChoiceId::PublishOpenItems))) => {
-            "候選人公開未解事項，沒有把選前說明包裝成問題已經消失；團隊留下後續追蹤窗口。"
+            "雨後陳情線：候選人公開未解事項，並留下後續追蹤窗口。"
         }
         (_, _, Some(StoryDecision::Skipped)) => {
-            "最後一段故事沒有作出新承諾；前兩段留下的追蹤工作仍等待選後接手。"
+            "雨後陳情線：最後一段沒有作出新承諾，追蹤工作仍等待選後接手。"
         }
-        _ => "這條故事線沒有走到最後一個選擇；留下的通報與待確認事項，仍是競選團隊需要交代的部分。",
-    }
+        _ => "雨後陳情線：留下的通報與待確認事項仍需交代。",
+    };
+    let clip_ending = match (
+        progress.decision(1),
+        progress.decision(3),
+        progress.decision(5),
+    ) {
+        (
+            Some(StoryDecision::Chosen(StoryChoiceId::PublishFullClip)),
+            Some(StoryDecision::Chosen(StoryChoiceId::PublishTimeline)),
+            Some(StoryDecision::Chosen(StoryChoiceId::DebateWithRecord)),
+        ) => "剪輯查證線：從完整影像走到公開時間軸，候選人最後帶著紀錄回到辯論臺。",
+        (
+            Some(StoryDecision::Chosen(StoryChoiceId::CandidateInterview)),
+            Some(StoryDecision::Chosen(StoryChoiceId::OpenQuestions)),
+            Some(StoryDecision::Chosen(StoryChoiceId::InterviewAfterDebate)),
+        ) => "剪輯查證線：候選人以多次公開問答回應質疑，讓仍未解答的問題也留在紀錄中。",
+        (_, _, Some(StoryDecision::Chosen(StoryChoiceId::PivotToTurnout))) => {
+            "剪輯查證線：最後把資源轉回投票日準備，並讓公開材料保留不同解讀的空間。"
+        }
+        (_, _, Some(StoryDecision::Chosen(StoryChoiceId::DebateWithRecord))) => {
+            "剪輯查證線：候選人帶著現有紀錄在辯論會回應，未確認部分仍待後續查證。"
+        }
+        (_, _, Some(StoryDecision::Chosen(StoryChoiceId::InterviewAfterDebate))) => {
+            "剪輯查證線：辯論後以專訪補充說明，團隊保留仍待確認的問題。"
+        }
+        (_, _, Some(StoryDecision::Skipped)) => {
+            "剪輯查證線：最後一段沒有新增回應，公開材料留給選民自行判讀。"
+        }
+        _ => "剪輯查證線：仍有尚待說明的脈絡與查證問題。",
+    };
+    format!("{rain_ending} {clip_ending}")
 }
 
 pub fn choice_for(beat_index: usize, choice_index: usize) -> Option<&'static StoryChoiceSpec> {
@@ -387,8 +628,11 @@ pub fn choice_for(beat_index: usize, choice_index: usize) -> Option<&'static Sto
 fn choices_for(beat_index: usize) -> Option<&'static [StoryChoiceSpec]> {
     Some(match beat_index {
         0 => OPENING_CHOICES,
-        1 => FOLLOWUP_CHOICES,
-        2 => CLOSING_CHOICES,
+        1 => CLIP_OPENING_CHOICES,
+        2 => FOLLOWUP_CHOICES,
+        3 => CLIP_FOLLOWUP_CHOICES,
+        4 => CLOSING_CHOICES,
+        5 => CLIP_CLOSING_CHOICES,
         _ => return None,
     })
 }
@@ -398,41 +642,73 @@ pub fn coherence_bonus(
     choice: StoryChoiceId,
     progress: StoryProgress,
 ) -> StoryBonus {
-    if beat_index != 2 {
-        return StoryBonus::default();
+    if beat_index == 4 {
+        return match (progress.decision(0), progress.decision(2), choice) {
+            (
+                Some(StoryDecision::Chosen(StoryChoiceId::FieldVisit)),
+                Some(StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)),
+                StoryChoiceId::ResidentReinspection,
+            ) => StoryBonus {
+                support_delta: 0.12,
+                trust_delta: 0.5,
+                note: Some("前後一致的現勘與居民協作路線，獲得信任加成。"),
+            },
+            (
+                Some(StoryDecision::Chosen(StoryChoiceId::PublishFacts)),
+                Some(StoryDecision::Chosen(StoryChoiceId::TrackProgress)),
+                StoryChoiceId::VerifiedDeadline,
+            ) => StoryBonus {
+                support_delta: 0.12,
+                trust_delta: 0.5,
+                note: Some("前後一致的資訊公開路線，獲得信任加成。"),
+            },
+            (
+                Some(StoryDecision::Chosen(StoryChoiceId::CoordinateNetwork)),
+                Some(StoryDecision::Chosen(StoryChoiceId::JointOversight)),
+                StoryChoiceId::PublishOpenItems,
+            ) => StoryBonus {
+                support_delta: 0.12,
+                trust_delta: 0.5,
+                note: Some("前後一致的地方協調與監督路線，獲得信任加成。"),
+            },
+            _ => StoryBonus::default(),
+        };
     }
 
-    let route = (progress.decision(0), progress.decision(1), choice);
-    match route {
-        (
-            Some(StoryDecision::Chosen(StoryChoiceId::FieldVisit)),
-            Some(StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)),
-            StoryChoiceId::ResidentReinspection,
-        ) => StoryBonus {
-            support_delta: 0.12,
-            trust_delta: 0.5,
-            note: Some("前後一致的現勘與居民協作路線，獲得信任加成。"),
-        },
-        (
-            Some(StoryDecision::Chosen(StoryChoiceId::PublishFacts)),
-            Some(StoryDecision::Chosen(StoryChoiceId::TrackProgress)),
-            StoryChoiceId::VerifiedDeadline,
-        ) => StoryBonus {
-            support_delta: 0.12,
-            trust_delta: 0.5,
-            note: Some("前後一致的資訊公開路線，獲得信任加成。"),
-        },
-        (
-            Some(StoryDecision::Chosen(StoryChoiceId::CoordinateNetwork)),
-            Some(StoryDecision::Chosen(StoryChoiceId::JointOversight)),
-            StoryChoiceId::PublishOpenItems,
-        ) => StoryBonus {
-            support_delta: 0.12,
-            trust_delta: 0.5,
-            note: Some("前後一致的地方協調與監督路線，獲得信任加成。"),
-        },
-        _ => StoryBonus::default(),
+    if beat_index == 5 {
+        return match (progress.decision(1), progress.decision(3), choice) {
+            (
+                Some(StoryDecision::Chosen(StoryChoiceId::PublishFullClip)),
+                Some(StoryDecision::Chosen(StoryChoiceId::PublishTimeline)),
+                StoryChoiceId::DebateWithRecord,
+            ) => StoryBonus {
+                support_delta: 0.12,
+                trust_delta: 0.6,
+                note: Some("前後一致的公開查證路線，獲得信任加成。"),
+            },
+            (
+                Some(StoryDecision::Chosen(StoryChoiceId::CandidateInterview)),
+                Some(StoryDecision::Chosen(StoryChoiceId::OpenQuestions)),
+                StoryChoiceId::InterviewAfterDebate,
+            ) => StoryBonus {
+                support_delta: 0.10,
+                trust_delta: 0.5,
+                note: Some("持續接受追問並保留紀錄，獲得小幅連貫加成。"),
+            },
+            (
+                Some(StoryDecision::Chosen(StoryChoiceId::IgnoreClip)),
+                Some(StoryDecision::Chosen(StoryChoiceId::SpokespersonBriefing)),
+                StoryChoiceId::PivotToTurnout,
+            ) => StoryBonus {
+                support_delta: 0.06,
+                trust_delta: 0.2,
+                note: Some("集中最後衝刺並完成團隊交接，獲得小幅節奏加成。"),
+            },
+            _ => StoryBonus::default(),
+        };
     }
+
+    StoryBonus::default()
 }
 
 #[cfg(test)]
@@ -440,41 +716,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn story_arc_has_three_separated_beats_and_branching_scenes() {
+    fn two_story_arcs_have_six_separated_beats_and_branching_scenes() {
         let mut progress = StoryProgress::default();
         let opening = beat_for_round(1, progress).unwrap();
         assert_eq!(opening.week, 2);
         assert_eq!(opening.choices.len(), 3);
         assert!(progress.record(0, StoryDecision::Chosen(StoryChoiceId::PublishFacts)));
 
+        let clip_opening = beat_for_round(3, progress).unwrap();
+        assert_eq!(clip_opening.week, 4);
+        assert_eq!(clip_opening.choices.len(), 3);
+        assert!(clip_opening.scene.contains("剪輯"));
+        assert!(progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip)));
+
         let followup = beat_for_round(5, progress).unwrap();
         assert_eq!(followup.week, 6);
         assert!(followup.scene.contains("已公開的資料"));
-        assert!(progress.record(1, StoryDecision::Chosen(StoryChoiceId::TrackProgress)));
+        assert!(progress.record(2, StoryDecision::Chosen(StoryChoiceId::TrackProgress)));
+
+        let clip_followup = beat_for_round(7, progress).unwrap();
+        assert_eq!(clip_followup.week, 8);
+        assert!(clip_followup.scene.contains("完整影像與逐字稿"));
+        assert!(progress.record(3, StoryDecision::Chosen(StoryChoiceId::PublishTimeline)));
 
         let closing = beat_for_round(9, progress).unwrap();
         assert_eq!(closing.week, 10);
         assert!(closing.scene.contains("公開追蹤表"));
+        assert!(progress.record(4, StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline)));
+
+        let clip_closing = beat_for_round(11, progress).unwrap();
+        assert_eq!(clip_closing.week, 12);
+        assert!(clip_closing.scene.contains("查證時間軸"));
+        assert_eq!(clip_closing.choices.len(), 3);
         assert!(beat_for_round(10, progress).is_none());
     }
 
     #[test]
-    fn coherent_story_routes_gain_a_small_closing_bonus_only() {
+    fn coherent_story_routes_gain_small_closing_bonuses_only() {
         let mut progress = StoryProgress::default();
         progress.record(0, StoryDecision::Chosen(StoryChoiceId::FieldVisit));
-        progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
+        progress.record(2, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
 
-        let coherent = coherence_bonus(2, StoryChoiceId::ResidentReinspection, progress);
+        let coherent = coherence_bonus(4, StoryChoiceId::ResidentReinspection, progress);
         assert_eq!(coherent.support_delta, 0.12);
         assert_eq!(coherent.trust_delta, 0.5);
         assert_eq!(
-            coherence_bonus(2, StoryChoiceId::PublishOpenItems, progress),
+            coherence_bonus(4, StoryChoiceId::PublishOpenItems, progress),
             StoryBonus::default()
         );
         assert_eq!(
             coherence_bonus(0, StoryChoiceId::FieldVisit, progress),
             StoryBonus::default()
         );
+
+        progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip));
+        progress.record(3, StoryDecision::Chosen(StoryChoiceId::PublishTimeline));
+        let clip_bonus = coherence_bonus(5, StoryChoiceId::DebateWithRecord, progress);
+        assert_eq!(clip_bonus.support_delta, 0.12);
+        assert_eq!(clip_bonus.trust_delta, 0.6);
     }
 
     #[test]
@@ -485,16 +784,28 @@ mod tests {
         assert!(daily_route_echo(3, 1, progress)
             .unwrap()
             .contains("現勘紀錄"));
-        progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
+        progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip));
+        assert!(daily_route_echo(5, 1, progress)
+            .unwrap()
+            .contains("完整影像"));
+        progress.record(2, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
         assert!(daily_route_echo(7, 1, progress).unwrap().contains("協調會"));
+        progress.record(3, StoryDecision::Chosen(StoryChoiceId::PublishTimeline));
+        assert!(daily_route_echo(9, 1, progress).unwrap().contains("時間軸"));
         progress.record(
-            2,
+            4,
             StoryDecision::Chosen(StoryChoiceId::ResidentReinspection),
         );
         assert!(daily_route_echo(11, 1, progress)
             .unwrap()
             .contains("居民代表"));
-        assert!(ending_note(progress).contains("共同復勘"));
-        assert!(daily_route_echo(11, 2, progress).is_none());
+        progress.record(5, StoryDecision::Chosen(StoryChoiceId::DebateWithRecord));
+        assert!(daily_route_echo(12, 2, progress)
+            .unwrap()
+            .contains("辯論會"));
+        let ending = ending_note(progress);
+        assert!(ending.contains("共同復勘"));
+        assert!(ending.contains("辯論臺"));
+        assert!(daily_route_echo(12, 3, progress).is_none());
     }
 }

@@ -3275,8 +3275,16 @@ mod tests {
         assert_eq!(game.polls, polls_before);
         assert_eq!(game.story_progress.completed_beats(), 0);
         game.skip_story_beat().unwrap();
-        assert_eq!(game.story_progress.summary(), "skip>pending>pending");
-        for _ in 0..4 * DAYS_PER_WEEK {
+        assert_eq!(
+            game.story_progress.summary(),
+            "skip>pending>pending>pending>pending>pending"
+        );
+        for _ in 0..2 * DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        assert_eq!(game.current_story_beat().unwrap().week, 4);
+        game.skip_story_beat().unwrap();
+        for _ in 0..2 * DAYS_PER_WEEK {
             game.apply_action(ActionId::RestAndPrepare).unwrap();
         }
         let next = game.current_story_beat().unwrap();

@@ -1018,7 +1018,7 @@ fn print_staffer_summary(game: &GameState) {
 
 fn print_candidate_story_summary(game: &GameState) {
     println!(
-        "候選人劇情回顧：完成 {}／3 段；決策路線：{}",
+        "候選人劇情回顧：完成 {}／6 段；決策路線：{}",
         game.story_progress.completed_beats(),
         game.story_progress.summary()
     );
