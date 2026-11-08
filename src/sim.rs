@@ -588,6 +588,7 @@ pub struct ActionOutcome {
     pub event_title: Option<&'static str>,
     pub share_before: f64,
     pub share_after: f64,
+    pub expected_support_delta: f64,
     pub trust_after: f64,
     pub turnout_after: f64,
     pub stamina_after: f64,
@@ -602,6 +603,26 @@ pub struct ActionOutcome {
     pub objective_reward: i32,
     pub week: u8,
     pub day: u8,
+}
+
+/// A deterministic, one-step estimate of an action before seeded noise is drawn.
+/// It is a forecast from this simulation model, not a poll or election prediction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActionPreview {
+    pub id: ActionId,
+    pub action_name: &'static str,
+    pub expected_swing: f64,
+    pub direct_support_delta: f64,
+    pub coordination_support_delta: f64,
+    pub expected_response_delta: f64,
+    pub expected_support_delta: f64,
+    pub event_match: bool,
+    pub local_match: bool,
+    pub objective_match: bool,
+    pub cost: i32,
+    pub trust_delta: f64,
+    pub turnout_delta: f64,
+    pub stamina_delta: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -858,11 +879,7 @@ impl GameState {
         self.weekly_objective_progress
     }
 
-    pub fn objectives_completed(&self) -> u8 {
-        self.objectives_completed
-    }
-
-    pub fn apply_action(&mut self, id: ActionId) -> Result<ActionOutcome, GameError> {
+    fn action_spec(&self, id: ActionId) -> Result<ActionSpec, GameError> {
         if self.final_outcome.is_some() {
             return Err(GameError::AlreadySettled);
         }
@@ -872,6 +889,7 @@ impl GameState {
         let action = actions_for(self.side)
             .iter()
             .find(|action| action.id == id)
+            .copied()
             .ok_or(GameError::ActionUnavailable)?;
         if self.budget < action.cost {
             return Err(GameError::InsufficientBudget {
@@ -891,56 +909,145 @@ impl GameState {
         if id == ActionId::CoalitionTalks && self.coalition_this_week {
             return Err(GameError::CoalitionAlreadyUsed);
         }
+        Ok(action)
+    }
 
-        let share_before = self.polls[self.player_index];
-        let week = self.round + 1;
-        let day = self.day + 1;
-        let current_objective = self.current_objective();
-        let objective_title = current_objective.map(|objective| objective.title);
-        let objective_target = current_objective
-            .map(|objective| objective.target_actions)
-            .unwrap_or(0);
-        let current_event = self.current_event();
-        let event_title = current_event.map(|event| event.title);
-        let event_match = current_event
-            .filter(|event| action.issues.contains(&event.issue))
-            .is_some();
-        let issue_bonus = if event_match {
+    /// Estimate an action's immediate effect without consuming campaign state or RNG.
+    pub fn preview_action(&self, id: ActionId) -> Result<ActionPreview, GameError> {
+        let action = self.action_spec(id)?;
+        Ok(self.preview_action_for(action))
+    }
+
+    fn preview_action_for(&self, action: ActionSpec) -> ActionPreview {
+        let before = self.polls[self.player_index];
+        let event_match = self
+            .current_event()
+            .is_some_and(|event| action.issues.contains(&event.issue));
+        let local_match = self
+            .region
+            .is_some_and(|region| action.issues.contains(&region.focus));
+        let objective_match = !self.weekly_objective_completed
+            && self.current_objective().is_some_and(|objective| {
+                objective.qualifying_actions.contains(&action.id)
+                    && self.weekly_objective_progress < objective.target_actions
+            });
+        let expected_swing = self.expected_action_swing(action).clamp(-0.2, 0.55);
+        let mut projected_polls = self.polls.clone();
+        let mut projected_segments = self.voter_segments.clone();
+        if expected_swing.abs() > f64::EPSILON {
+            apply_segment_swing_to_state(
+                &mut projected_polls,
+                &mut projected_segments,
+                self.player_index,
+                expected_swing,
+                action.issues,
+            );
+        }
+        let direct_support_delta = projected_polls[self.player_index] - before;
+
+        if action.id == ActionId::PollCoordination {
+            if let Some(target) = weakest_rival_index(&projected_polls, self.player_index) {
+                let success_chance = (0.30
+                    + (self.trust - 50.0) * 0.003
+                    + (self.player_attributes.communication - 50.0) * 0.006)
+                    .clamp(0.12, 0.72);
+                let expected_transfer_rate = success_chance * 0.06;
+                transfer_segment_support_at_rate(
+                    &mut projected_polls,
+                    &mut projected_segments,
+                    target,
+                    self.player_index,
+                    expected_transfer_rate,
+                );
+            }
+        } else if action.id == ActionId::CoalitionTalks {
+            if let Some(target) = self.most_compatible_rival() {
+                let affinity = party_affinity(
+                    self.candidates[self.player_index].party,
+                    self.candidates[target].party,
+                );
+                let success_chance =
+                    (0.14 + affinity * 0.005 + (self.trust - 50.0) * 0.002).clamp(0.08, 0.72);
+                let expected_transfer_rate = success_chance * 0.065;
+                transfer_segment_support_at_rate(
+                    &mut projected_polls,
+                    &mut projected_segments,
+                    target,
+                    self.player_index,
+                    expected_transfer_rate,
+                );
+            }
+        }
+        let after_coordination = projected_polls[self.player_index];
+        let coordination_support_delta = after_coordination - (before + direct_support_delta);
+
+        if action.id != ActionId::RestAndPrepare {
+            if let Some(rival_index) = strongest_rival_index(&projected_polls, self.player_index) {
+                apply_segment_swing_to_state(
+                    &mut projected_polls,
+                    &mut projected_segments,
+                    rival_index,
+                    0.055,
+                    &[],
+                );
+            }
+        }
+        let expected_support_after = projected_polls[self.player_index];
+        let expected_response_delta = expected_support_after - after_coordination;
+        let trust_after = (self.trust + action.trust_delta).clamp(0.0, 100.0);
+        let turnout_after = (self.turnout_momentum + action.turnout_delta).clamp(0.0, 100.0);
+        let stamina_after =
+            (self.stamina - action.stamina_cost + action.stamina_recovery).clamp(0.0, 100.0);
+
+        ActionPreview {
+            id: action.id,
+            action_name: action.name,
+            expected_swing,
+            direct_support_delta,
+            coordination_support_delta,
+            expected_response_delta,
+            expected_support_delta: expected_support_after - before,
+            event_match,
+            local_match,
+            objective_match,
+            cost: action.cost,
+            trust_delta: trust_after - self.trust,
+            turnout_delta: turnout_after - self.turnout_momentum,
+            stamina_delta: stamina_after - self.stamina,
+        }
+    }
+
+    fn expected_action_swing(&self, action: ActionSpec) -> f64 {
+        if action.id == ActionId::RestAndPrepare {
+            return 0.0;
+        }
+        let issue_bonus = if self
+            .current_event()
+            .is_some_and(|event| action.issues.contains(&event.issue))
+        {
             0.12 * self
                 .model_parameters
                 .multiplier(SensitivityParameter::EventBonus)
         } else {
             0.0
         };
-        let local_match = self
+        let local_match = if self
             .region
-            .filter(|region| action.issues.contains(&region.focus))
-            .map(|_| {
-                0.08 * self
-                    .model_parameters
-                    .multiplier(SensitivityParameter::LocalFocusBonus)
-            })
-            .unwrap_or(0.0);
+            .is_some_and(|region| action.issues.contains(&region.focus))
+        {
+            0.08 * self
+                .model_parameters
+                .multiplier(SensitivityParameter::LocalFocusBonus)
+        } else {
+            0.0
+        };
         let trust_bonus = ((self.trust - 50.0)
             * 0.004
             * self
                 .model_parameters
                 .multiplier(SensitivityParameter::TrustModifier))
         .clamp(-0.2, 0.2);
-        let skill = match action.id {
-            ActionId::PolicyDelivery | ActionId::CrisisResponse | ActionId::PolicyForum => {
-                self.player_attributes.policy
-            }
-            ActionId::CommunityTour
-            | ActionId::PublicServices
-            | ActionId::LegalAssembly
-            | ActionId::CoalitionTalks => self.player_attributes.organization,
-            ActionId::TransparencyReport
-            | ActionId::OversightPetition
-            | ActionId::PublicMessage
-            | ActionId::RestAndPrepare
-            | ActionId::PollCoordination => self.player_attributes.communication,
-        };
+        let skill = action_skill(self.player_attributes, action.id);
         let skill_bonus = ((skill - 50.0) * 0.006).clamp(-0.2, 0.2);
         let base_fatigue_penalty = if self.stamina < 20.0 {
             -0.12
@@ -953,6 +1060,36 @@ impl GameState {
             * self
                 .model_parameters
                 .multiplier(SensitivityParameter::FatiguePenalty);
+        action.base_swing
+            * self
+                .model_parameters
+                .multiplier(SensitivityParameter::ActionSwing)
+            + issue_bonus
+            + local_match
+            + trust_bonus
+            + skill_bonus
+            + fatigue_penalty
+    }
+
+    pub fn objectives_completed(&self) -> u8 {
+        self.objectives_completed
+    }
+
+    pub fn apply_action(&mut self, id: ActionId) -> Result<ActionOutcome, GameError> {
+        let action = self.action_spec(id)?;
+        let preview = self.preview_action_for(action);
+
+        let share_before = self.polls[self.player_index];
+        let week = self.round + 1;
+        let day = self.day + 1;
+        let current_objective = self.current_objective();
+        let objective_title = current_objective.map(|objective| objective.title);
+        let objective_target = current_objective
+            .map(|objective| objective.target_actions)
+            .unwrap_or(0);
+        let current_event = self.current_event();
+        let event_title = current_event.map(|event| event.title);
+        let event_match = preview.event_match;
         let daily_noise = 0.07
             * self
                 .model_parameters
@@ -961,17 +1098,7 @@ impl GameState {
         let swing = if id == ActionId::RestAndPrepare {
             0.0
         } else {
-            (action.base_swing
-                * self
-                    .model_parameters
-                    .multiplier(SensitivityParameter::ActionSwing)
-                + issue_bonus
-                + local_match
-                + trust_bonus
-                + skill_bonus
-                + fatigue_penalty
-                + jitter)
-                .clamp(-0.2, 0.55)
+            (self.expected_action_swing(action) + jitter).clamp(-0.2, 0.55)
         };
 
         self.budget -= action.cost;
@@ -1085,6 +1212,7 @@ impl GameState {
             event_title,
             share_before,
             share_after: self.polls[self.player_index],
+            expected_support_delta: preview.expected_support_delta,
             trust_after: self.trust,
             turnout_after: self.turnout_momentum,
             stamina_after: self.stamina,
@@ -1291,21 +1419,11 @@ impl GameState {
     }
 
     fn strongest_rival(&self) -> Option<usize> {
-        self.polls
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != self.player_index)
-            .max_by(|(_, left), (_, right)| left.total_cmp(right))
-            .map(|(index, _)| index)
+        strongest_rival_index(&self.polls, self.player_index)
     }
 
     fn weakest_rival(&self) -> Option<usize> {
-        self.polls
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != self.player_index)
-            .min_by(|(_, left), (_, right)| left.total_cmp(right))
-            .map(|(index, _)| index)
+        weakest_rival_index(&self.polls, self.player_index)
     }
 
     fn most_compatible_rival(&self) -> Option<usize> {
@@ -1322,36 +1440,13 @@ impl GameState {
     }
 
     fn apply_segment_swing(&mut self, candidate_index: usize, swing: f64, issues: &[Issue]) {
-        if self.voter_segments.is_empty() {
-            shift_share(&mut self.polls, candidate_index, swing);
-            return;
-        }
-        let factors: Vec<f64> = VOTER_SEGMENTS
-            .iter()
-            .map(|segment| {
-                segment.responsiveness
-                    * if issues.contains(&segment.priority) {
-                        1.45
-                    } else {
-                        0.72
-                    }
-            })
-            .collect();
-        let weighted_mean = VOTER_SEGMENTS
-            .iter()
-            .zip(&factors)
-            .map(|(segment, factor)| segment.weight_pct * factor)
-            .sum::<f64>()
-            / 100.0;
-        for (segment, factor) in self.voter_segments.iter_mut().zip(factors) {
-            let segment_swing = if weighted_mean > f64::EPSILON {
-                swing * factor / weighted_mean
-            } else {
-                swing
-            };
-            shift_share(&mut segment.polls, candidate_index, segment_swing);
-        }
-        self.sync_polls_from_segments();
+        apply_segment_swing_to_state(
+            &mut self.polls,
+            &mut self.voter_segments,
+            candidate_index,
+            swing,
+            issues,
+        );
     }
 
     fn transfer_segment_support(&mut self, from: usize, rate: f64) -> f64 {
@@ -1379,6 +1474,109 @@ impl GameState {
             }
         }
         normalize(&mut self.polls);
+    }
+}
+
+fn apply_segment_swing_to_state(
+    polls: &mut [f64],
+    voter_segments: &mut [VoterSegmentPoll],
+    candidate_index: usize,
+    swing: f64,
+    issues: &[Issue],
+) {
+    if voter_segments.is_empty() {
+        shift_share(polls, candidate_index, swing);
+        return;
+    }
+    let factors: Vec<f64> = VOTER_SEGMENTS
+        .iter()
+        .map(|segment| {
+            segment.responsiveness
+                * if issues.contains(&segment.priority) {
+                    1.45
+                } else {
+                    0.72
+                }
+        })
+        .collect();
+    let weighted_mean = VOTER_SEGMENTS
+        .iter()
+        .zip(&factors)
+        .map(|(segment, factor)| segment.weight_pct * factor)
+        .sum::<f64>()
+        / 100.0;
+    for (segment, factor) in voter_segments.iter_mut().zip(factors) {
+        let segment_swing = if weighted_mean > f64::EPSILON {
+            swing * factor / weighted_mean
+        } else {
+            swing
+        };
+        shift_share(&mut segment.polls, candidate_index, segment_swing);
+    }
+    sync_polls_from_segments(polls, voter_segments);
+}
+
+fn sync_polls_from_segments(polls: &mut [f64], voter_segments: &[VoterSegmentPoll]) {
+    polls.fill(0.0);
+    for segment in voter_segments {
+        for (total, share) in polls.iter_mut().zip(&segment.polls) {
+            *total += share * segment.weight_pct / 100.0;
+        }
+    }
+    normalize(polls);
+}
+
+fn transfer_segment_support_at_rate(
+    polls: &mut [f64],
+    voter_segments: &mut [VoterSegmentPoll],
+    from: usize,
+    to: usize,
+    rate: f64,
+) {
+    if voter_segments.is_empty() {
+        let amount = polls.get(from).copied().unwrap_or(0.0) * rate;
+        transfer_share(polls, from, to, amount);
+        return;
+    }
+    for segment in voter_segments.iter_mut() {
+        let amount = segment.polls.get(from).copied().unwrap_or(0.0) * rate;
+        transfer_share(&mut segment.polls, from, to, amount);
+    }
+    sync_polls_from_segments(polls, voter_segments);
+}
+
+fn strongest_rival_index(polls: &[f64], player_index: usize) -> Option<usize> {
+    polls
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != player_index)
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(index, _)| index)
+}
+
+fn weakest_rival_index(polls: &[f64], player_index: usize) -> Option<usize> {
+    polls
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != player_index)
+        .min_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(index, _)| index)
+}
+
+fn action_skill(attributes: CandidateAttributes, id: ActionId) -> f64 {
+    match id {
+        ActionId::PolicyDelivery | ActionId::CrisisResponse | ActionId::PolicyForum => {
+            attributes.policy
+        }
+        ActionId::CommunityTour
+        | ActionId::PublicServices
+        | ActionId::LegalAssembly
+        | ActionId::CoalitionTalks => attributes.organization,
+        ActionId::TransparencyReport
+        | ActionId::OversightPetition
+        | ActionId::PublicMessage
+        | ActionId::RestAndPrepare
+        | ActionId::PollCoordination => attributes.communication,
     }
 }
 
@@ -1633,6 +1831,30 @@ mod tests {
         }
         assert_eq!(baseline.polls, configured.polls);
         assert_eq!(baseline.finish(), configured.finish());
+    }
+
+    #[test]
+    fn action_preview_is_non_mutating_and_does_not_consume_randomness() {
+        let mut previewed =
+            GameState::new_with_style(2024, Side::Challenger, 421, CampaignStyle::Policy);
+        let mut control =
+            GameState::new_with_style(2024, Side::Challenger, 421, CampaignStyle::Policy);
+        let polls_before = previewed.polls.clone();
+        let budget_before = previewed.budget;
+
+        let preview = previewed.preview_action(ActionId::PolicyForum).unwrap();
+        assert!(preview.expected_support_delta.is_finite());
+        assert_eq!(previewed.polls, polls_before);
+        assert_eq!(previewed.budget, budget_before);
+
+        let with_preview = previewed.apply_action(ActionId::PolicyForum).unwrap();
+        let without_preview = control.apply_action(ActionId::PolicyForum).unwrap();
+        assert_eq!(previewed.polls, control.polls);
+        assert_eq!(with_preview.share_after, without_preview.share_after);
+        assert_eq!(
+            with_preview.expected_support_delta,
+            preview.expected_support_delta
+        );
     }
 
     #[test]

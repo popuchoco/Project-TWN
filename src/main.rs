@@ -4,18 +4,20 @@ use project_twn::history::{
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
-    ModelParameters, SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+    actions_for, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState, ModelParameters,
+    SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
+use project_twn::strategy::{StrategyEngine, StrategyProfile};
 use std::collections::HashMap;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
-const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\tsensitivity_parameter_2\tmultiplier_2";
+const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\tsensitivity_parameter_2\tmultiplier_2";
 const MAX_BATCH_RUNS: u32 = 10_000;
+const MAX_STRATEGY_SWEEP_RUNS: u32 = 1_000;
 const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
 const MAX_INTERACTION_SENSITIVITY_SEEDS: u32 = 100;
 
@@ -23,6 +25,7 @@ struct Options {
     year: u16,
     role: Option<Side>,
     style: CampaignStyle,
+    strategy: StrategyProfile,
     seed: u64,
     auto: bool,
     history: bool,
@@ -34,6 +37,7 @@ struct Options {
     log: Option<String>,
     batch: Option<u32>,
     sweep_styles: bool,
+    sweep_strategies: bool,
     sensitivity: bool,
     interaction_sensitivity: bool,
     batch_log: Option<String>,
@@ -104,16 +108,16 @@ fn run() -> Result<(), String> {
         selected_party,
     };
     let mut game = new_scenario_game(&scenario, options.seed, ModelParameters::default());
-    print_intro(&game, options.seed);
+    print_intro(&game, options.seed, options.strategy);
 
     if options.auto {
-        run_auto(&mut game, true);
+        run_auto(&mut game, true, options.strategy);
     } else {
-        run_interactive(&mut game)?;
+        run_interactive(&mut game, options.strategy)?;
     }
     let result = print_final(&mut game);
     if let Some(path) = options.log.as_deref() {
-        save_campaign_log(path, &game, &result, options.seed)?;
+        save_campaign_log(path, &game, &result, options.seed, options.strategy)?;
         println!("本場紀錄已追加至：{path}");
     }
     Ok(())
@@ -191,6 +195,7 @@ fn parse_args() -> Result<Options, String> {
         year: 2026,
         role: None,
         style: CampaignStyle::Balanced,
+        strategy: StrategyProfile::Balanced,
         seed: 2026,
         auto: false,
         history: false,
@@ -202,6 +207,7 @@ fn parse_args() -> Result<Options, String> {
         log: None,
         batch: None,
         sweep_styles: false,
+        sweep_strategies: false,
         sensitivity: false,
         interaction_sensitivity: false,
         batch_log: None,
@@ -246,6 +252,7 @@ fn parse_args() -> Result<Options, String> {
                 );
             }
             "--sweep-styles" => options.sweep_styles = true,
+            "--sweep-strategies" => options.sweep_strategies = true,
             "--sensitivity" => options.sensitivity = true,
             "--interaction-sensitivity" => options.interaction_sensitivity = true,
             "--batch-log" => {
@@ -272,6 +279,12 @@ fn parse_args() -> Result<Options, String> {
                     "--style 後面需要 balanced、policy、organizer 或 communicator".to_string()
                 })?;
                 options.style = parse_style(&value)?;
+            }
+            "--strategy" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--strategy 後面需要策略名稱".to_string())?;
+                options.strategy = StrategyProfile::parse(&value)?;
             }
             "--seed" => {
                 let value = args
@@ -300,19 +313,34 @@ fn parse_args() -> Result<Options, String> {
     if options.sweep_styles && options.batch.is_none() {
         return Err("--sweep-styles 必須搭配 --batch 使用。".to_string());
     }
+    if options.sweep_strategies && options.batch.is_none() {
+        return Err("--sweep-strategies 必須搭配 --batch 使用。".to_string());
+    }
+    if options.sweep_strategies && options.sweep_styles {
+        return Err("--sweep-strategies 與 --sweep-styles 請分開執行。".to_string());
+    }
+    if options.sweep_strategies
+        && options
+            .batch
+            .is_some_and(|runs| runs > MAX_STRATEGY_SWEEP_RUNS)
+    {
+        return Err(format!(
+            "策略比較每個策略最多使用 {MAX_STRATEGY_SWEEP_RUNS} 個 seed。"
+        ));
+    }
     if options.sensitivity && options.batch.is_none() {
         return Err("--sensitivity 必須搭配 --batch 使用。".to_string());
     }
-    if options.sensitivity && options.sweep_styles {
-        return Err("--sensitivity 與 --sweep-styles 是不同比較設計，請分開執行。".to_string());
+    if options.sensitivity && (options.sweep_styles || options.sweep_strategies) {
+        return Err("--sensitivity 請與 --sweep-styles、--sweep-strategies 分開執行。".to_string());
     }
     if options.interaction_sensitivity && options.batch.is_none() {
         return Err("--interaction-sensitivity 必須搭配 --batch 使用。".to_string());
     }
-    if options.interaction_sensitivity && (options.sweep_styles || options.sensitivity) {
-        return Err(
-            "--interaction-sensitivity 請與 --sweep-styles、--sensitivity 分開執行。".to_string(),
-        );
+    if options.interaction_sensitivity
+        && (options.sweep_styles || options.sweep_strategies || options.sensitivity)
+    {
+        return Err("--interaction-sensitivity 請與其他批次比較模式分開執行。".to_string());
     }
     if options.interaction_sensitivity
         && options
@@ -375,13 +403,14 @@ fn ask_role() -> Result<Side, String> {
     }
 }
 
-fn print_intro(game: &GameState, seed: u64) {
+fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
     println!("\n=== 臺灣選戰模擬器 | Project-TWN ===");
     println!(
-        "情境年份：{}　陣營：{}　風格：{}　隨機種子：{}",
+        "情境年份：{}　陣營：{}　能力風格：{}　策略引擎：{}　隨機種子：{}",
         game.campaign_year,
         game.side.label(),
         game.style.label(),
+        strategy.label(),
         seed
     );
     if let Some(region) = game.region {
@@ -477,7 +506,8 @@ fn print_poll_table(game: &GameState) {
     }
 }
 
-fn run_interactive(game: &mut GameState) -> Result<(), String> {
+fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<(), String> {
+    let engine = StrategyEngine::new(strategy);
     while !game.is_finished() {
         println!(
             "\n--- 第 {} / {} 週・第 {} / {} 天｜{} ---",
@@ -504,18 +534,32 @@ fn run_interactive(game: &mut GameState) -> Result<(), String> {
                 objective.title, bar, progress, target, objective.description
             );
         }
-        let actions: Vec<_> = actions_for(game.side)
-            .iter()
-            .copied()
-            .filter(|action| action_available(game, action.id))
-            .collect();
-        for (index, action) in actions.iter().enumerate() {
+        let recommendations = engine.rank_actions(game);
+        for (index, recommendation) in recommendations.iter().enumerate() {
+            let action = actions_for(game.side)
+                .iter()
+                .find(|action| action.id == recommendation.preview.id)
+                .ok_or_else(|| "策略引擎回傳了不適用的行動。".to_string())?;
+            let rationale = if recommendation.rationales.is_empty() {
+                "符合目前整體盤勢".to_string()
+            } else {
+                recommendation.rationales.join("、")
+            };
             println!(
-                "  {}) {}（費用 {}）— {}",
+                "  {}) {}（預算 {}）— 預估支持度 {:+.2} 點〔直接 {:+.2}／整合 {:+.2}／對手平均回應 {:+.2}〕、信任 {:+.2}、動員 {:+.2}、體力 {:+.2}｜策略分 {:.2}｜{}｜{}",
                 index + 1,
                 action.name,
-                action.cost,
-                action.description
+                recommendation.preview.cost,
+                recommendation.preview.expected_support_delta,
+                recommendation.preview.direct_support_delta,
+                recommendation.preview.coordination_support_delta,
+                recommendation.preview.expected_response_delta,
+                recommendation.preview.trust_delta,
+                recommendation.preview.turnout_delta,
+                recommendation.preview.stamina_delta,
+                recommendation.score,
+                rationale,
+                action.description,
             );
         }
         print!("選行動（輸入編號，q 結束）：");
@@ -534,11 +578,11 @@ fn run_interactive(game: &mut GameState) -> Result<(), String> {
                 continue;
             }
         };
-        let Some(action) = actions.get(choice.saturating_sub(1)) else {
+        let Some(recommendation) = recommendations.get(choice.saturating_sub(1)) else {
             println!("沒有這個選項。\n");
             continue;
         };
-        match game.apply_action(action.id) {
+        match game.apply_action(recommendation.preview.id) {
             Ok(outcome) => print_action_outcome(game, &outcome),
             Err(message) => println!("{message}\n"),
         }
@@ -546,59 +590,17 @@ fn run_interactive(game: &mut GameState) -> Result<(), String> {
     Ok(())
 }
 
-fn run_auto(game: &mut GameState, show_progress: bool) {
-    let actions = actions_for(game.side);
-    let preferred = match game.side {
-        Side::Incumbent => [
-            ActionId::PolicyDelivery,
-            ActionId::CrisisResponse,
-            ActionId::TransparencyReport,
-            ActionId::PublicServices,
-            ActionId::PollCoordination,
-        ],
-        Side::Challenger => [
-            ActionId::CommunityTour,
-            ActionId::PolicyForum,
-            ActionId::LegalAssembly,
-            ActionId::CoalitionTalks,
-            ActionId::PollCoordination,
-        ],
-    };
+fn run_auto(game: &mut GameState, show_progress: bool, strategy: StrategyProfile) {
+    let engine = StrategyEngine::new(strategy);
     while !game.is_finished() {
-        let preferred_id = preferred
-            [(game.round as usize * DAYS_PER_WEEK as usize + game.day as usize) % preferred.len()];
-        let objective_action = game
-            .current_objective()
-            .filter(|objective| game.current_objective_progress() < objective.target_actions)
-            .and_then(|objective| {
-                objective.qualifying_actions.iter().find(|id| {
-                    actions.iter().any(|action| {
-                        action.id == **id
-                            && action.cost <= game.budget
-                            && action_available(game, action.id)
-                    })
-                })
-            })
-            .copied();
-        let selected = objective_action
-            .and_then(|id| actions.iter().find(|action| action.id == id))
-            .or_else(|| {
-                actions.iter().find(|action| {
-                    action.id == preferred_id
-                        && action.cost <= game.budget
-                        && action_available(game, action.id)
-                })
-            })
-            .or_else(|| {
-                actions
-                    .iter()
-                    .find(|action| action.cost <= game.budget && action_available(game, action.id))
-            });
-        let Some(action) = selected else { break };
-        if let Ok(outcome) = game.apply_action(action.id) {
-            if show_progress {
-                print_action_outcome(game, &outcome);
-            }
+        let Some(recommendation) = engine.rank_actions(game).into_iter().next() else {
+            break;
+        };
+        let Ok(outcome) = game.apply_action(recommendation.preview.id) else {
+            break;
+        };
+        if show_progress {
+            print_action_outcome(game, &outcome);
         }
     }
 }
@@ -606,6 +608,7 @@ fn run_auto(game: &mut GameState, show_progress: bool) {
 #[derive(Clone, Debug)]
 struct BatchRecord {
     style: CampaignStyle,
+    strategy: StrategyProfile,
     seed: u64,
     sensitivity_parameter: &'static str,
     multiplier: f64,
@@ -623,6 +626,14 @@ struct BatchRecord {
     trust: f64,
     mobilization: f64,
     scorecard: CampaignScorecard,
+}
+
+#[derive(Clone, Copy)]
+struct SensitivitySetting {
+    parameter: &'static str,
+    multiplier: f64,
+    parameter_2: &'static str,
+    multiplier_2: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -662,33 +673,43 @@ fn run_batch(
     } else {
         vec![options.style]
     };
-    let mut records = Vec::with_capacity(runs as usize * styles.len());
+    let strategies = if options.sweep_strategies {
+        StrategyProfile::ALL.to_vec()
+    } else {
+        vec![options.strategy]
+    };
+    let mut records = Vec::with_capacity(runs as usize * styles.len() * strategies.len());
 
-    for &style in &styles {
-        let scenario = BatchScenario {
-            options,
-            role,
-            style,
-            region,
-            selected_party,
-        };
-        for offset in 0..runs {
-            let seed = options.seed + u64::from(offset);
-            records.push(simulate_batch_record(
-                &scenario,
-                seed,
-                ModelParameters::default(),
-                "baseline",
-                1.0,
-                "none",
-                1.0,
-            ));
+    for &strategy in &strategies {
+        for &style in &styles {
+            let scenario = BatchScenario {
+                options,
+                role,
+                style,
+                region,
+                selected_party,
+            };
+            for offset in 0..runs {
+                let seed = options.seed + u64::from(offset);
+                records.push(simulate_batch_record(
+                    &scenario,
+                    seed,
+                    ModelParameters::default(),
+                    SensitivitySetting {
+                        parameter: "baseline",
+                        multiplier: 1.0,
+                        parameter_2: "none",
+                        multiplier_2: 1.0,
+                    },
+                    strategy,
+                ));
+            }
         }
     }
 
     println!("=== 批次模擬摘要 ===");
     println!(
-        "情境：{} 年、{}、{}；seed：{}–{}；每種風格 {} 場。",
+        "情境：{} 年、{}、{}；seed：{}–{}；每種能力風格／策略 {} 場。",
         options.year,
         role.label(),
         region.map(|value| value.name).unwrap_or("總統全國情境"),
@@ -699,15 +720,26 @@ fn run_batch(
     if let Some(party) = selected_party {
         println!("玩家政黨情境：{}。", party.name);
     }
-    for style in &styles {
-        let group: Vec<_> = records
-            .iter()
-            .filter(|record| record.style == *style && record.sensitivity_parameter == "baseline")
-            .collect();
-        let metrics = batch_metrics(&group);
-        print_batch_metrics(style.label(), &metrics);
+    for strategy in &strategies {
+        for style in &styles {
+            let group: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record.style == *style
+                        && record.strategy == *strategy
+                        && record.sensitivity_parameter == "baseline"
+                })
+                .collect();
+            let metrics = batch_metrics(&group);
+            print_batch_metrics(
+                &format!("{}／{}", style.label(), strategy.label()),
+                &metrics,
+            );
+        }
     }
-    println!("結果僅描述固定自動策略下的遊戲模型跑次，不是民調或選舉預測。");
+    println!(
+        "結果是固定策略模組下的遊戲模型跑次，不是民調或選舉預測；策略評分權重是透明的遊戲啟發式。"
+    );
 
     if let Some(path) = options.batch_log.as_deref() {
         save_batch_log(path, options, role, region, &records)?;
@@ -720,13 +752,11 @@ fn simulate_batch_record(
     scenario: &BatchScenario<'_>,
     seed: u64,
     model_parameters: ModelParameters,
-    sensitivity_parameter: &'static str,
-    multiplier: f64,
-    sensitivity_parameter_2: &'static str,
-    multiplier_2: f64,
+    sensitivity: SensitivitySetting,
+    strategy: StrategyProfile,
 ) -> BatchRecord {
     let mut game = new_scenario_game(scenario, seed, model_parameters);
-    run_auto(&mut game, false);
+    run_auto(&mut game, false, strategy);
     let result = game.finish();
     let winner = &game.candidates[result.winner_index];
     let player = &game.candidates[game.player_index];
@@ -740,11 +770,12 @@ fn simulate_batch_record(
         .fold(0.0, f64::max);
     BatchRecord {
         style: scenario.style,
+        strategy,
         seed,
-        sensitivity_parameter,
-        multiplier,
-        sensitivity_parameter_2,
-        multiplier_2,
+        sensitivity_parameter: sensitivity.parameter,
+        multiplier: sensitivity.multiplier,
+        sensitivity_parameter_2: sensitivity.parameter_2,
+        multiplier_2: sensitivity.multiplier_2,
         winner_candidate: winner.name.clone(),
         winner_party: winner.party.to_string(),
         player_party: player.party.to_string(),
@@ -785,10 +816,13 @@ fn run_sensitivity_batch(
             &scenario,
             seed,
             ModelParameters::default(),
-            "baseline",
-            1.0,
-            "none",
-            1.0,
+            SensitivitySetting {
+                parameter: "baseline",
+                multiplier: 1.0,
+                parameter_2: "none",
+                multiplier_2: 1.0,
+            },
+            options.strategy,
         ));
     }
     for parameter in SensitivityParameter::ALL {
@@ -802,10 +836,13 @@ fn run_sensitivity_batch(
                     &scenario,
                     seed,
                     model_parameters,
-                    parameter.key(),
-                    multiplier,
-                    "none",
-                    1.0,
+                    SensitivitySetting {
+                        parameter: parameter.key(),
+                        multiplier,
+                        parameter_2: "none",
+                        multiplier_2: 1.0,
+                    },
+                    options.strategy,
                 ));
             }
         }
@@ -813,11 +850,12 @@ fn run_sensitivity_batch(
 
     println!("=== 模型參數單因子敏感度（±20%）===");
     println!(
-        "情境：{} 年、{}、{}、{}；配對 seed：{}–{}；每項比較 {} 場。",
+        "情境：{} 年、{}、{}、能力風格 {}、策略 {}；配對 seed：{}–{}；每項比較 {} 場。",
         options.year,
         role.label(),
         region.map(|value| value.name).unwrap_or("總統全國情境"),
         options.style.label(),
+        options.strategy.label(),
         options.seed,
         last_seed,
         runs
@@ -920,10 +958,13 @@ fn run_interaction_sensitivity_batch(
                         &scenario,
                         options.seed + u64::from(offset),
                         model_parameters,
-                        first.key(),
-                        first_multiplier,
-                        second.key(),
-                        second_multiplier,
+                        SensitivitySetting {
+                            parameter: first.key(),
+                            multiplier: first_multiplier,
+                            parameter_2: second.key(),
+                            multiplier_2: second_multiplier,
+                        },
+                        options.strategy,
                     ));
                 }
             }
@@ -932,11 +973,12 @@ fn run_interaction_sensitivity_batch(
 
     println!("=== 模型參數二因子交互作用敏感度（0.8×／1.2× 2×2 配對）===");
     println!(
-        "情境：{} 年、{}、{}、{}；配對 seed：{}–{}；每組 {} 場、共 {} 組參數交互作用。",
+        "情境：{} 年、{}、{}、能力風格 {}、策略 {}；配對 seed：{}–{}；每組 {} 場、共 {} 組參數交互作用。",
         options.year,
         role.label(),
         region.map(|value| value.name).unwrap_or("總統全國情境"),
         options.style.label(),
+        options.strategy.label(),
         options.seed,
         last_seed,
         runs,
@@ -1124,12 +1166,13 @@ fn save_batch_log(
         let review = record.scorecard;
         writeln!(
             file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{:.2}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{:.2}",
             options.year,
             mode,
             tsv_cell(region_name),
             role.label(),
             record.style.label(),
+            record.strategy.key(),
             record.seed,
             record.sensitivity_parameter,
             record.multiplier,
@@ -1163,12 +1206,14 @@ fn tsv_cell(value: &str) -> String {
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
     println!(
-        "✓ 第 {} 週・第 {} 天 {}：玩家民調 {:.2}% → {:.2}%（費用 {}、本週補給 +{}、餘額 {}）",
+        "✓ 第 {} 週・第 {} 天 {}：玩家支持 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
         outcome.week,
         outcome.day,
         outcome.action_name,
         outcome.share_before,
         outcome.share_after,
+        outcome.share_after - outcome.share_before,
+        outcome.expected_support_delta,
         outcome.cost,
         outcome.weekly_funding,
         outcome.budget_after
@@ -1198,14 +1243,6 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
     );
     if outcome.day == DAYS_PER_WEEK {
         print_poll_table(game);
-    }
-}
-
-fn action_available(game: &GameState, id: ActionId) -> bool {
-    match id {
-        ActionId::PollCoordination => game.candidates.len() >= 3 && !game.poll_taken_this_week,
-        ActionId::CoalitionTalks => game.candidates.len() >= 3 && !game.coalition_this_week,
-        _ => true,
     }
 }
 
@@ -1365,6 +1402,7 @@ fn save_campaign_log(
     game: &GameState,
     result: &ElectionOutcome,
     seed: u64,
+    strategy: StrategyProfile,
 ) -> Result<(), String> {
     let log_path = Path::new(path);
     let exists = log_path.exists();
@@ -1397,7 +1435,7 @@ fn save_campaign_log(
     let review = game.scorecard();
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
         game.campaign_year,
         if game.region.is_some() {
             "local"
@@ -1410,6 +1448,7 @@ fn save_campaign_log(
             .replace('\t', " "),
         game.side.label(),
         game.style.label(),
+        strategy.key(),
         seed,
         winner.party,
         result.player_win_probability,
@@ -1469,21 +1508,26 @@ fn print_usage() {
   project-twn --regions
   project-twn --parties
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
-      [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
-  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--sweep-styles | --sensitivity | --interaction-sensitivity]
+      [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable]
+      [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
+  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--strategy 策略]
+      [--sweep-styles | --sweep-strategies | --sensitivity | --interaction-sensitivity]
       [--year 年份] [--region 縣市] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
 
 範例：
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
-  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto
+  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --strategy issue --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
+  cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sweep-strategies --batch-log strategy.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sensitivity --batch-log sensitivity.tsv
   cargo run -- --batch 10 --year 2024 --role challenger --seed 1000 --interaction-sensitivity --batch-log interactions.tsv
 
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
-省略單場模式的 --role 會詢問陣營；--auto 以固定示範策略跑完。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
-批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
+省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
+策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務及資源續航拆成可組合模組；--strategy 選擇權重組合，互動模式提供排序建議，--auto 依排序採取行動。
+策略分數是遊戲啟發式，支持度是模型一步期望值；執行後另外顯示含 seed 波動與對手反應的實際變化，兩者都不是民調或選舉預測。
+批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sweep-strategies 以同一 seed 比較六種策略模組組合（最多 1,000 個 seed）；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
     );
 }
 
@@ -1522,8 +1566,8 @@ mod tests {
         let mut left = GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
         let mut right =
             GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
-        run_auto(&mut left, false);
-        run_auto(&mut right, false);
+        run_auto(&mut left, false, StrategyProfile::Balanced);
+        run_auto(&mut right, false, StrategyProfile::Balanced);
         assert_eq!(left.polls, right.polls);
         assert_eq!(left.finish(), right.finish());
         assert_eq!(left.objectives_completed(), right.objectives_completed());
