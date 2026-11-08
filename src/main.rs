@@ -7,8 +7,8 @@ use project_twn::sim::{
     actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
     ModelParameters, SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
-use std::env;
 use std::collections::HashMap;
+use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
@@ -298,7 +298,11 @@ fn parse_args() -> Result<Options, String> {
     if options.sensitivity && options.sweep_styles {
         return Err("--sensitivity 與 --sweep-styles 是不同比較設計，請分開執行。".to_string());
     }
-    if options.sensitivity && options.batch.is_some_and(|runs| runs > MAX_SENSITIVITY_SEEDS) {
+    if options.sensitivity
+        && options
+            .batch
+            .is_some_and(|runs| runs > MAX_SENSITIVITY_SEEDS)
+    {
         return Err(format!(
             "單因子敏感度每個參數最多使用 {MAX_SENSITIVITY_SEEDS} 個 seed。"
         ));
@@ -797,7 +801,10 @@ fn run_sensitivity_batch(
         .collect();
     let baseline_metrics = batch_metrics(&baseline);
     print_batch_metrics("基準參數", &baseline_metrics);
-    let baseline_by_seed: HashMap<_, _> = baseline.iter().map(|record| (record.seed, *record)).collect();
+    let baseline_by_seed: HashMap<_, _> = baseline
+        .iter()
+        .map(|record| (record.seed, *record))
+        .collect();
     for parameter in SensitivityParameter::ALL {
         for multiplier in [0.8, 1.2] {
             let group: Vec<_> = records
@@ -811,8 +818,7 @@ fn run_sensitivity_batch(
             let paired_share_delta = group
                 .iter()
                 .map(|record| {
-                    record.player_final_share
-                        - baseline_by_seed[&record.seed].player_final_share
+                    record.player_final_share - baseline_by_seed[&record.seed].player_final_share
                 })
                 .sum::<f64>()
                 / group.len() as f64;
@@ -863,11 +869,7 @@ fn batch_metrics(group: &[&BatchRecord]) -> BatchMetrics {
             .map(|record| record.player_final_share)
             .sum::<f64>()
             / count,
-        mean_signed_margin: group
-            .iter()
-            .map(|record| record.signed_margin)
-            .sum::<f64>()
-            / count,
+        mean_signed_margin: group.iter().map(|record| record.signed_margin).sum::<f64>() / count,
         mean_objectives: group
             .iter()
             .map(|record| f64::from(record.objectives_completed))

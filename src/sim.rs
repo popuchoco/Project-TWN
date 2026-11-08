@@ -1161,7 +1161,8 @@ impl GameState {
                 .multiplier(SensitivityParameter::TerminalNoise);
         for sample in 0..samples {
             let mut ballot = self.polls.clone();
-            let late_swing = self.rng.between(-terminal_noise, terminal_noise) + mobilization_effect;
+            let late_swing =
+                self.rng.between(-terminal_noise, terminal_noise) + mobilization_effect;
             shift_share(&mut ballot, self.player_index, late_swing);
             if sample == 0 {
                 final_shares = ballot.clone();
@@ -1646,7 +1647,8 @@ mod tests {
             .with_multiplier(SensitivityParameter::DailyNoise, f64::NAN)
             .is_err());
 
-        let mut baseline = GameState::new_with_style(2024, Side::Challenger, 73, CampaignStyle::Balanced);
+        let mut baseline =
+            GameState::new_with_style(2024, Side::Challenger, 73, CampaignStyle::Balanced);
         let mut reduced = GameState::new_with_style_and_parameters(
             2024,
             Side::Challenger,
