@@ -1,11 +1,11 @@
 use project_twn::history::{
-    find_party, find_region, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS, PARTY_PROFILES, REGIONS,
-    VOTER_SEGMENTS,
+    find_party, find_region, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS, PARTY_PROFILES, PartyProfile,
+    RegionProfile, REGIONS, VOTER_SEGMENTS,
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    actions_for, ActionId, CampaignStyle, ElectionOutcome, GameState, Side, CAMPAIGN_ROUNDS,
-    DAYS_PER_WEEK,
+    actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState, Side,
+    CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
 use std::env;
 use std::fs::OpenOptions;
@@ -13,6 +13,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility";
+const MAX_BATCH_RUNS: u32 = 10_000;
 
 struct Options {
     year: u16,
@@ -27,6 +29,9 @@ struct Options {
     party: Option<String>,
     primary: bool,
     log: Option<String>,
+    batch: Option<u32>,
+    sweep_styles: bool,
+    batch_log: Option<String>,
 }
 
 fn main() {
@@ -52,6 +57,20 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    if let Some(runs) = options.batch {
+        let role = options
+            .role
+            .ok_or_else(|| "批次模擬必須明確指定 --role，避免把互動預設混入結果。".to_string())?;
+        if options.primary {
+            return Err("批次模式目前不支援 --primary；請先使用單場初選確認策略風格。".to_string());
+        }
+        if options.log.is_some() {
+            return Err("批次結果請使用 --batch-log；--log 僅供單場紀錄。".to_string());
+        }
+        let (region, selected_party) = resolve_scenario(&options, role)?;
+        return run_batch(&options, runs, role, region, selected_party);
+    }
+
     let role = match options.role {
         Some(role) => role,
         None if options.auto || options.party.is_some() => Side::Challenger,
@@ -62,6 +81,27 @@ fn run() -> Result<(), String> {
     } else {
         options.style
     };
+    let (region, selected_party) = resolve_scenario(&options, role)?;
+    let mut game = new_scenario_game(&options, role, style, options.seed, region, selected_party);
+    print_intro(&game, options.seed);
+
+    if options.auto {
+        run_auto(&mut game, true);
+    } else {
+        run_interactive(&mut game)?;
+    }
+    let result = print_final(&mut game);
+    if let Some(path) = options.log.as_deref() {
+        save_campaign_log(path, &game, &result, options.seed)?;
+        println!("本場紀錄已追加至：{path}");
+    }
+    Ok(())
+}
+
+fn resolve_scenario(
+    options: &Options,
+    role: Side,
+) -> Result<(Option<&'static RegionProfile>, Option<&'static PartyProfile>), String> {
     let region = match options.region.as_deref() {
         Some(query) => Some(
             find_region(query)
@@ -90,30 +130,28 @@ fn run() -> Result<(), String> {
             return Err("執政方 --party 必須符合該地 2022 上屆首長政黨；若扮演其他政黨請選 --role challenger。".to_string());
         }
     }
-    let mut game = match region {
+    Ok((region, selected_party))
+}
+
+fn new_scenario_game(
+    options: &Options,
+    role: Side,
+    style: CampaignStyle,
+    seed: u64,
+    region: Option<&'static RegionProfile>,
+    selected_party: Option<&'static PartyProfile>,
+) -> GameState {
+    match region {
         Some(region) => GameState::new_local_with_party(
             options.year,
             role,
-            options.seed,
+            seed,
             style,
             region,
             selected_party,
         ),
-        None => GameState::new_with_style(options.year, role, options.seed, style),
-    };
-    print_intro(&game, options.seed);
-
-    if options.auto {
-        run_auto(&mut game);
-    } else {
-        run_interactive(&mut game)?;
+        None => GameState::new_with_style(options.year, role, seed, style),
     }
-    let result = print_final(&mut game);
-    if let Some(path) = options.log.as_deref() {
-        save_campaign_log(path, &game, &result, options.seed)?;
-        println!("本場紀錄已追加至：{path}");
-    }
-    Ok(())
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -131,6 +169,9 @@ fn parse_args() -> Result<Options, String> {
         party: None,
         primary: false,
         log: None,
+        batch: None,
+        sweep_styles: false,
+        batch_log: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -159,6 +200,23 @@ fn parse_args() -> Result<Options, String> {
                 options.log = Some(
                     args.next()
                         .ok_or_else(|| "--log 後面需要 TSV 檔案路徑".to_string())?,
+                )
+            }
+            "--batch" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--batch 後面需要批次場數".to_string())?;
+                options.batch = Some(
+                    value
+                        .parse()
+                        .map_err(|_| "批次場數必須是正整數".to_string())?,
+                );
+            }
+            "--sweep-styles" => options.sweep_styles = true,
+            "--batch-log" => {
+                options.batch_log = Some(
+                    args.next()
+                        .ok_or_else(|| "--batch-log 後面需要 TSV 檔案路徑".to_string())?,
                 )
             }
             "--simulate" => {}
@@ -198,6 +256,17 @@ fn parse_args() -> Result<Options, String> {
     }
     if !(1996..=2026).contains(&options.year) {
         return Err("情境年份請選 1996–2026".to_string());
+    }
+    if let Some(runs) = options.batch {
+        if runs == 0 || runs > MAX_BATCH_RUNS {
+            return Err(format!("批次場數需介於 1–{MAX_BATCH_RUNS}。"));
+        }
+    }
+    if options.sweep_styles && options.batch.is_none() {
+        return Err("--sweep-styles 必須搭配 --batch 使用。".to_string());
+    }
+    if options.batch_log.is_some() && options.batch.is_none() {
+        return Err("--batch-log 必須搭配 --batch 使用。".to_string());
     }
     Ok(options)
 }
@@ -410,7 +479,7 @@ fn run_interactive(game: &mut GameState) -> Result<(), String> {
     Ok(())
 }
 
-fn run_auto(game: &mut GameState) {
+fn run_auto(game: &mut GameState, show_progress: bool) {
     let actions = actions_for(game.side);
     let preferred = match game.side {
         Side::Incumbent => [
@@ -460,9 +529,237 @@ fn run_auto(game: &mut GameState) {
             });
         let Some(action) = selected else { break };
         if let Ok(outcome) = game.apply_action(action.id) {
-            print_action_outcome(game, &outcome);
+            if show_progress {
+                print_action_outcome(game, &outcome);
+            }
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct BatchRecord {
+    style: CampaignStyle,
+    seed: u64,
+    winner_candidate: String,
+    winner_party: String,
+    player_party: String,
+    player_won: bool,
+    player_win_probability: f64,
+    player_final_share: f64,
+    signed_margin: f64,
+    objectives_completed: u8,
+    budget_remaining: i32,
+    trust: f64,
+    mobilization: f64,
+    scorecard: CampaignScorecard,
+}
+
+fn run_batch(
+    options: &Options,
+    runs: u32,
+    role: Side,
+    region: Option<&'static RegionProfile>,
+    selected_party: Option<&'static PartyProfile>,
+) -> Result<(), String> {
+    let last_seed = options
+        .seed
+        .checked_add(u64::from(runs - 1))
+        .ok_or_else(|| "seed 範圍超出 u64 上限。".to_string())?;
+    let styles: Vec<_> = if options.sweep_styles {
+        vec![
+            CampaignStyle::Balanced,
+            CampaignStyle::Policy,
+            CampaignStyle::Organizer,
+            CampaignStyle::Communicator,
+        ]
+    } else {
+        vec![options.style]
+    };
+    let mut records = Vec::with_capacity(runs as usize * styles.len());
+
+    for &style in &styles {
+        for offset in 0..runs {
+            let seed = options.seed + u64::from(offset);
+            let mut game = new_scenario_game(options, role, style, seed, region, selected_party);
+            run_auto(&mut game, false);
+            let result = game.finish();
+            let winner = &game.candidates[result.winner_index];
+            let player = &game.candidates[game.player_index];
+            let player_final_share = result.shares[game.player_index];
+            let strongest_opponent_share = result
+                .shares
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != game.player_index)
+                .map(|(_, share)| *share)
+                .fold(0.0, f64::max);
+            records.push(BatchRecord {
+                style,
+                seed,
+                winner_candidate: winner.name.clone(),
+                winner_party: winner.party.to_string(),
+                player_party: player.party.to_string(),
+                player_won: result.winner_index == game.player_index,
+                player_win_probability: result.player_win_probability,
+                player_final_share,
+                signed_margin: player_final_share - strongest_opponent_share,
+                objectives_completed: game.objectives_completed(),
+                budget_remaining: game.budget,
+                trust: game.trust,
+                mobilization: game.turnout_momentum,
+                scorecard: game.scorecard(),
+            });
+        }
+    }
+
+    println!("=== 批次模擬摘要 ===");
+    println!(
+        "情境：{} 年、{}、{}；seed：{}–{}；每種風格 {} 場。",
+        options.year,
+        role.label(),
+        region.map(|value| value.name).unwrap_or("總統全國情境"),
+        options.seed,
+        last_seed,
+        runs
+    );
+    if let Some(party) = selected_party {
+        println!("玩家政黨情境：{}。", party.name);
+    }
+    for style in &styles {
+        let group: Vec<_> = records.iter().filter(|record| record.style == *style).collect();
+        let count = group.len() as f64;
+        let wins = group.iter().filter(|record| record.player_won).count() as f64;
+        let mean_model_probability = group
+            .iter()
+            .map(|record| record.player_win_probability)
+            .sum::<f64>()
+            / count;
+        let mean_final_share = group
+            .iter()
+            .map(|record| record.player_final_share)
+            .sum::<f64>()
+            / count;
+        let mean_signed_margin = group
+            .iter()
+            .map(|record| record.signed_margin)
+            .sum::<f64>()
+            / count;
+        let mean_objectives = group
+            .iter()
+            .map(|record| f64::from(record.objectives_completed))
+            .sum::<f64>()
+            / count;
+        let mut shares: Vec<_> = group
+            .iter()
+            .map(|record| record.player_final_share)
+            .collect();
+        shares.sort_by(f64::total_cmp);
+        println!(
+            "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜平均週任務 {:.1}/{}",
+            style.label(),
+            wins / count * 100.0,
+            mean_model_probability * 100.0,
+            mean_final_share,
+            percentile(&shares, 0.10),
+            percentile(&shares, 0.50),
+            percentile(&shares, 0.90),
+            mean_signed_margin,
+            mean_objectives,
+            CAMPAIGN_ROUNDS
+        );
+    }
+    println!("結果僅描述固定自動策略下的遊戲模型跑次，不是民調或選舉預測。");
+
+    if let Some(path) = options.batch_log.as_deref() {
+        save_batch_log(path, options, role, region, &records)?;
+        println!("逐場原始結果已追加至：{path}");
+    }
+    Ok(())
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    let index = ((sorted.len() as f64 * p).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len().saturating_sub(1));
+    sorted.get(index).copied().unwrap_or(0.0)
+}
+
+fn save_batch_log(
+    path: &str,
+    options: &Options,
+    role: Side,
+    region: Option<&RegionProfile>,
+    records: &[BatchRecord],
+) -> Result<(), String> {
+    let log_path = Path::new(path);
+    let exists = log_path.exists();
+    let needs_header = !exists
+        || log_path
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .len()
+            == 0;
+    if exists && !needs_header {
+        let mut header = String::new();
+        BufReader::new(std::fs::File::open(log_path).map_err(|error| error.to_string())?)
+            .read_line(&mut header)
+            .map_err(|error| error.to_string())?;
+        if header.trim_end() != BATCH_LOG_HEADER {
+            return Err(
+                "批次紀錄欄位與目前版本不同，請指定新的 --batch-log 檔名以免混合格式。"
+                    .to_string(),
+            );
+        }
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("無法寫入批次紀錄：{error}"))?;
+    if needs_header {
+        writeln!(file, "{BATCH_LOG_HEADER}").map_err(|error| error.to_string())?;
+    }
+    let mode = if region.is_some() {
+        "local"
+    } else {
+        "presidential"
+    };
+    let region_name = region.map(|value| value.name).unwrap_or("-");
+    for record in records {
+        let review = record.scorecard;
+        writeln!(
+            file,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
+            options.year,
+            mode,
+            tsv_cell(region_name),
+            role.label(),
+            record.style.label(),
+            record.seed,
+            tsv_cell(&record.winner_candidate),
+            tsv_cell(&record.winner_party),
+            tsv_cell(&record.player_party),
+            record.player_won,
+            record.player_win_probability,
+            record.player_final_share,
+            record.signed_margin,
+            record.objectives_completed,
+            record.budget_remaining,
+            record.trust,
+            record.mobilization,
+            review.policy,
+            review.event_response,
+            review.resource_management,
+            review.versatility
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    file.flush().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn tsv_cell(value: &str) -> String {
+    value.replace('\t', " ").replace('\r', " ").replace('\n', " ")
 }
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
@@ -765,5 +1062,51 @@ fn print_history() {
 }
 
 fn print_usage() {
-    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --parties\n  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n  cargo run -- --parties\n\n年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視歷史政黨範本。競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可將每場結果與戰役操作評分附加至 TSV，累積長期戰績。");
+    println!(
+        "Project-TWN — 臺灣選戰模擬器
+
+使用方式：
+  project-twn --history
+  project-twn --regions
+  project-twn --parties
+  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
+      [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
+  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--sweep-styles]
+      [--year 年份] [--region 縣市] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
+
+範例：
+  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
+  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto
+  cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
+
+年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
+競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
+省略單場模式的 --role 會詢問陣營；--auto 以固定示範策略跑完。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
+批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格。批次數值是遊戲情境結果，不是民調或選舉預測。"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentile_uses_nearest_rank_and_handles_empty_data() {
+        let values = [10.0, 20.0, 30.0, 40.0];
+        assert_eq!(percentile(&values, 0.10), 10.0);
+        assert_eq!(percentile(&values, 0.50), 20.0);
+        assert_eq!(percentile(&values, 0.90), 40.0);
+        assert_eq!(percentile(&[], 0.50), 0.0);
+    }
+
+    #[test]
+    fn batch_autopilot_is_reproducible_for_a_fixed_seed_and_style() {
+        let mut left = GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
+        let mut right = GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
+        run_auto(&mut left, false);
+        run_auto(&mut right, false);
+        assert_eq!(left.polls, right.polls);
+        assert_eq!(left.finish(), right.finish());
+        assert_eq!(left.objectives_completed(), right.objectives_completed());
+    }
 }

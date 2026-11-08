@@ -33,3 +33,12 @@ jobs:
 
       - name: Run tests
         run: cargo test --all-targets
+
+      - name: Smoke-test batch summary and TSV export
+        run: |
+          cargo run -- --batch 2 --year 2024 --role challenger --seed 77 --sweep-styles --batch-log target/ci-batch-runs.tsv
+          $rows = @(Get-Content target/ci-batch-runs.tsv)
+          if ($rows.Count -ne 9) { throw "Expected a header and 8 style/seed rows; got $($rows.Count)." }
+          foreach ($row in $rows) {
+            if ($row.Split("`t").Count -ne 21) { throw "Unexpected batch TSV column count." }
+          }

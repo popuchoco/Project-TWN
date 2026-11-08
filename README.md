@@ -12,6 +12,7 @@ cargo run -- --simulate 2024 --role challenger --seed 42
 cargo run -- --year 2026 --region 臺北市 --role challenger --seed 7 --auto
 cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto
 cargo run -- --year 2026 --region 高雄市 --primary --seed 7
+cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
 cargo run -- --regions
 cargo run -- --parties
 ```
@@ -38,6 +39,13 @@ cargo run -- --parties
 - `--regions` 列出 22 個縣市；`--region 臺北市` 等選項可進入 2026 年地方首長情境。上屆政黨參照 2022 年地方選舉結果；起始支持度與地方議題權重屬於遊戲平衡設定，並非官方得票或縣市民調。用 `--party 新黨`、`--party 社會民主黨` 等情境範本探索第三勢力。
 - `--primary` 提供政策派、組織派、溝通派三條虛構提名路線及四回合策略選擇。每回合會並列多候選人支持度和兩兩互比；提名結果決定後續玩家能力組合。
 - 「韓流」做為2018地方選舉的歷史事件卡；2026「洋流」做為正在形成的選戰敘事／公民參與議題卡。媒體與研究對這些現象有不同解讀，事件卡不把任何一方設定為固定受益者。
+
+## 批次模擬與風格比較
+
+- `--batch N` 以起始 `--seed` 起算，連續執行 N 個固定 seed 的自動示範；需明確提供 `--role`。目前每種風格最多 10,000 場。
+- `--sweep-styles` 以相同 seed 範圍比較均衡、政策、組織、溝通四種能力風格，可用於策略敏感度探索；自動行動政策固定，因此結果只反映指定情境與示範策略，不代表人類玩家策略的普遍效果。
+- `--batch-log runs.tsv` 會逐場追加 TSV 原始跑次，包含 seed、實際勝者、玩家終局支持與票差、模型內勝率、任務、資源及戰役操作軸。欄位不相容時會拒絕混寫；請為新版格式另指定檔名。
+- 摘要呈現各 seed 的實際勝出比例、模型內平均勝率、終局支持均值與 P10／P50／P90、平均票差和任務完成數。這些是遊戲模型結果，不是民調或選舉預測；多 seed 只檢查模型內行為，仍需另外校準真實參數。
 
 ## 歷史資料範圍
 
