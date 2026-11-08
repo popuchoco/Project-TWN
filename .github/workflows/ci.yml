@@ -127,7 +127,7 @@ jobs:
           $output = Get-Content target/ci-story-output.txt -Raw
           if (-not $output.Contains("雨後一條路")) { throw "Automatic play omitted the story arc." }
           if (-not $output.Contains("遊戲模式：候選人模式")) { throw "Opening screen did not name candidate mode." }
-          if ([regex]::Matches($output, "候選人行程").Count -ne 84) { throw "Candidate mode should show the full daily campaign story." }
+          if ([regex]::Matches($output, "【候選人行程｜").Count -ne 84) { throw "Candidate mode should show the full daily campaign story." }
           if ([regex]::Matches($output, "候選人劇情：").Count -ne 84) { throw "Candidate actions should advance their story." }
           if ([regex]::Matches($output, "【多週情境｜第 ").Count -ne 3) { throw "Candidate mode should resolve the three branching story beats." }
           if ([regex]::Matches($output, "劇情回聲：").Count -ne 3) { throw "Candidate story choices should echo into later campaign weeks." }
