@@ -145,6 +145,72 @@ pub enum ActionId {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct WeeklyObjective {
+    pub title: &'static str,
+    pub description: &'static str,
+    pub qualifying_actions: &'static [ActionId],
+    pub target_actions: u8,
+}
+
+const INCUMBENT_WEEKLY_OBJECTIVES: &[WeeklyObjective] = &[
+    WeeklyObjective {
+        title: "交付政策成果",
+        description: "以具體施政、危機應變或民生服務完成兩項行動。",
+        qualifying_actions: &[
+            ActionId::PolicyDelivery,
+            ActionId::CrisisResponse,
+            ActionId::PublicServices,
+        ],
+        target_actions: 2,
+    },
+    WeeklyObjective {
+        title: "公開資訊與回應質疑",
+        description: "透過施政檢討或公開政策問答完成兩項溝通行動。",
+        qualifying_actions: &[ActionId::TransparencyReport, ActionId::PublicMessage],
+        target_actions: 2,
+    },
+    WeeklyObjective {
+        title: "穩定地方服務",
+        description: "以民生服務或施政方案回應在地生活議題，完成兩項行動。",
+        qualifying_actions: &[ActionId::PublicServices, ActionId::PolicyDelivery],
+        target_actions: 2,
+    },
+    WeeklyObjective {
+        title: "維持競選續航",
+        description: "安排政策準備與休息，完成兩次休息與準備。",
+        qualifying_actions: &[ActionId::RestAndPrepare],
+        target_actions: 2,
+    },
+];
+
+const CHALLENGER_WEEKLY_OBJECTIVES: &[WeeklyObjective] = &[
+    WeeklyObjective {
+        title: "走入社區、擴大參與",
+        description: "透過社區走訪或依法集會完成兩項公民參與行動。",
+        qualifying_actions: &[ActionId::CommunityTour, ActionId::LegalAssembly],
+        target_actions: 2,
+    },
+    WeeklyObjective {
+        title: "提出可檢驗的替代方案",
+        description: "以政見論壇或監督提案完成兩項政策論述行動。",
+        qualifying_actions: &[ActionId::PolicyForum, ActionId::OversightPetition],
+        target_actions: 2,
+    },
+    WeeklyObjective {
+        title: "建立可信的監督與說明",
+        description: "用監督提案或公開政策問答完成兩項溝通行動。",
+        qualifying_actions: &[ActionId::OversightPetition, ActionId::PublicMessage],
+        target_actions: 2,
+    },
+    WeeklyObjective {
+        title: "維持競選續航",
+        description: "安排政策準備與休息，完成兩次休息與準備。",
+        qualifying_actions: &[ActionId::RestAndPrepare],
+        target_actions: 2,
+    },
+];
+
+#[derive(Clone, Copy, Debug)]
 pub struct ActionSpec {
     pub id: ActionId,
     pub name: &'static str,
@@ -397,6 +463,10 @@ pub struct GameState {
     /// One seeded issue focus per campaign week. `events` remains the full
     /// eligible event pool displayed to the player.
     event_schedule: Vec<&'static EventCard>,
+    weekly_objective_schedule: Vec<&'static WeeklyObjective>,
+    weekly_objective_progress: u8,
+    weekly_objective_completed: bool,
+    objectives_completed: u8,
     action_uses: [u8; 12],
     matched_events: u8,
     pub poll_taken_this_week: bool,
@@ -418,6 +488,11 @@ pub struct ActionOutcome {
     pub weekly_funding: i32,
     pub budget_after: i32,
     pub coordination_note: Option<String>,
+    pub objective_title: Option<&'static str>,
+    pub objective_progress: u8,
+    pub objective_target: u8,
+    pub objective_completed: bool,
+    pub objective_reward: i32,
     pub week: u8,
     pub day: u8,
 }
@@ -584,6 +659,7 @@ impl GameState {
         let events = events_for_campaign(campaign_year);
         let mut rng = Rng::new(seed);
         let event_schedule = make_event_schedule(&events, &mut rng);
+        let weekly_objective_schedule = make_weekly_objective_schedule(side, &mut rng);
 
         Self {
             campaign_year,
@@ -604,6 +680,10 @@ impl GameState {
             day: 0,
             events,
             event_schedule,
+            weekly_objective_schedule,
+            weekly_objective_progress: 0,
+            weekly_objective_completed: false,
+            objectives_completed: 0,
             action_uses: [0; 12],
             matched_events: 0,
             poll_taken_this_week: false,
@@ -615,6 +695,20 @@ impl GameState {
 
     pub fn current_event(&self) -> Option<&'static EventCard> {
         self.event_schedule.get(self.round as usize).copied()
+    }
+
+    pub fn current_objective(&self) -> Option<&'static WeeklyObjective> {
+        self.weekly_objective_schedule
+            .get(self.round as usize)
+            .copied()
+    }
+
+    pub fn current_objective_progress(&self) -> u8 {
+        self.weekly_objective_progress
+    }
+
+    pub fn objectives_completed(&self) -> u8 {
+        self.objectives_completed
     }
 
     pub fn apply_action(&mut self, id: ActionId) -> Result<ActionOutcome, GameError> {
@@ -650,6 +744,11 @@ impl GameState {
         let share_before = self.polls[self.player_index];
         let week = self.round + 1;
         let day = self.day + 1;
+        let current_objective = self.current_objective();
+        let objective_title = current_objective.map(|objective| objective.title);
+        let objective_target = current_objective
+            .map(|objective| objective.target_actions)
+            .unwrap_or(0);
         let current_event = self.current_event();
         let event_title = current_event.map(|event| event.title);
         let event_match = current_event
@@ -765,9 +864,30 @@ impl GameState {
         self.stamina =
             (self.stamina - action.stamina_cost + action.stamina_recovery).clamp(0.0, 100.0);
         self.action_uses[action_index(id)] = self.action_uses[action_index(id)].saturating_add(1);
+        let mut objective_completed = false;
+        let mut objective_reward = 0;
+        if let Some(objective) = current_objective {
+            if objective.qualifying_actions.contains(&id) {
+                self.weekly_objective_progress = self
+                    .weekly_objective_progress
+                    .saturating_add(1)
+                    .min(objective.target_actions);
+            }
+            if !self.weekly_objective_completed
+                && self.weekly_objective_progress >= objective.target_actions
+            {
+                self.weekly_objective_completed = true;
+                self.objectives_completed = self.objectives_completed.saturating_add(1);
+                let before_reward = self.budget;
+                self.budget = (self.budget + 1).min(MAX_BUDGET);
+                objective_reward = self.budget - before_reward;
+                objective_completed = true;
+            }
+        }
         if event_match {
             self.matched_events = self.matched_events.saturating_add(1);
         }
+        let objective_progress = self.weekly_objective_progress;
         let mut weekly_funding = 0;
         if day == DAYS_PER_WEEK {
             let before_funding = self.budget;
@@ -777,6 +897,8 @@ impl GameState {
             self.day = 0;
             self.poll_taken_this_week = false;
             self.coalition_this_week = false;
+            self.weekly_objective_progress = 0;
+            self.weekly_objective_completed = false;
         } else {
             self.day += 1;
         }
@@ -793,6 +915,11 @@ impl GameState {
             weekly_funding,
             budget_after: self.budget,
             coordination_note,
+            objective_title,
+            objective_progress,
+            objective_target,
+            objective_completed,
+            objective_reward,
             week,
             day,
         })
@@ -939,6 +1066,33 @@ impl GameState {
         if self.events.is_empty() && !self.event_schedule.is_empty() {
             return Err("event schedule must be empty when no events are eligible");
         }
+        if self.weekly_objective_schedule.len() != CAMPAIGN_ROUNDS as usize
+            || self.weekly_objective_schedule.iter().any(|objective| {
+                objective.target_actions == 0
+                    || objective.qualifying_actions.is_empty()
+                    || objective
+                        .qualifying_actions
+                        .iter()
+                        .any(|id| !actions_for(self.side).iter().any(|action| action.id == *id))
+            })
+        {
+            return Err("each campaign week must have a valid objective");
+        }
+        if self.objectives_completed > self.round.saturating_add(1).min(CAMPAIGN_ROUNDS) {
+            return Err("completed weekly objectives cannot exceed campaign weeks reached");
+        }
+        if let Some(objective) = self.current_objective() {
+            if self.weekly_objective_progress > objective.target_actions {
+                return Err("weekly objective progress cannot exceed its target");
+            }
+            if self.weekly_objective_completed
+                && self.weekly_objective_progress < objective.target_actions
+            {
+                return Err("completed weekly objectives must have met their target");
+            }
+        } else if self.weekly_objective_progress != 0 || self.weekly_objective_completed {
+            return Err("completed campaigns cannot retain in-progress weekly objectives");
+        }
         if let Some(outcome) = &self.final_outcome {
             if outcome.winner_index >= self.candidates.len()
                 || !is_valid_share_vector(&outcome.shares)
@@ -1072,6 +1226,37 @@ fn make_event_schedule(events: &[&'static EventCard], rng: &mut Rng) -> Vec<&'st
             }
         }
         schedule.push(deck.pop().expect("event deck is refilled before use"));
+    }
+    schedule
+}
+
+fn make_weekly_objective_schedule(side: Side, rng: &mut Rng) -> Vec<&'static WeeklyObjective> {
+    let objectives = match side {
+        Side::Incumbent => INCUMBENT_WEEKLY_OBJECTIVES,
+        Side::Challenger => CHALLENGER_WEEKLY_OBJECTIVES,
+    };
+    let mut schedule = Vec::with_capacity(CAMPAIGN_ROUNDS as usize);
+    let mut deck: Vec<&'static WeeklyObjective> = Vec::new();
+
+    while schedule.len() < CAMPAIGN_ROUNDS as usize {
+        if deck.is_empty() {
+            deck.extend(objectives);
+            for index in (1..deck.len()).rev() {
+                let other = (rng.next_u64() % (index as u64 + 1)) as usize;
+                deck.swap(index, other);
+            }
+            if deck.len() > 1
+                && schedule
+                    .last()
+                    .is_some_and(|previous: &&'static WeeklyObjective| {
+                        previous.title == deck.last().expect("objective deck is not empty").title
+                    })
+            {
+                let last = deck.len() - 1;
+                deck.swap(last, last - 1);
+            }
+        }
+        schedule.push(deck.pop().expect("objective deck is refilled before use"));
     }
     schedule
 }
@@ -1268,6 +1453,57 @@ mod tests {
             .iter()
             .any(|eligible| eligible.title == event.title)));
         assert!(left.validate().is_ok());
+    }
+
+    #[test]
+    fn weekly_objective_schedule_is_seeded_and_varied() {
+        let left = GameState::new(2024, Side::Challenger, 4242);
+        let right = GameState::new(2024, Side::Challenger, 4242);
+        let left_titles: Vec<_> = left
+            .weekly_objective_schedule
+            .iter()
+            .map(|objective| objective.title)
+            .collect();
+        let right_titles: Vec<_> = right
+            .weekly_objective_schedule
+            .iter()
+            .map(|objective| objective.title)
+            .collect();
+
+        assert_eq!(left_titles, right_titles);
+        assert_eq!(left_titles.len(), CAMPAIGN_ROUNDS as usize);
+        assert!(left_titles.windows(2).all(|pair| pair[0] != pair[1]));
+        assert!(left.validate().is_ok());
+    }
+
+    #[test]
+    fn weekly_objective_rewards_once_and_resets_at_week_boundary() {
+        let mut game = GameState::new(2024, Side::Challenger, 77);
+        let objective = game.current_objective().unwrap();
+        let title = objective.title;
+        let action = objective.qualifying_actions[0];
+
+        game.apply_action(action).unwrap();
+        assert_eq!(game.current_objective_progress(), 1);
+        assert_eq!(game.objectives_completed(), 0);
+        let completed = game.apply_action(action).unwrap();
+        assert!(completed.objective_completed);
+        assert_eq!(completed.objective_title, Some(title));
+        assert_eq!(completed.objective_progress, objective.target_actions);
+        assert_eq!(completed.objective_reward, 1);
+        assert_eq!(game.objectives_completed(), 1);
+        assert!(game.validate().is_ok());
+
+        let repeated = game.apply_action(action).unwrap();
+        assert!(!repeated.objective_completed);
+        assert_eq!(repeated.objective_reward, 0);
+        for _ in 0..DAYS_PER_WEEK - 3 {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        assert_eq!(game.round, 1);
+        assert_eq!(game.current_objective_progress(), 0);
+        assert_ne!(game.current_objective().unwrap().title, title);
+        assert!(game.validate().is_ok());
     }
 
     #[test]

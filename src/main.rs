@@ -9,8 +9,10 @@ use project_twn::sim::{
 };
 use std::env;
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
+
+const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
 
 struct Options {
     year: u16,
@@ -273,6 +275,9 @@ fn print_intro(game: &GameState, seed: u64) {
     }
     println!("競選期：{CAMPAIGN_ROUNDS} 週 × {DAYS_PER_WEEK} 天，共 {} 個每日決策（布局／議題攻防／決戰三階段）；起始預算：{}　信任：{:.1}/100　體力：{:.1}/100", CAMPAIGN_ROUNDS as u16 * DAYS_PER_WEEK as u16, game.budget, game.trust, game.stamina);
     println!(
+        "每週會抽取一項陣營任務；達成可獲得最多 +1 預算。目標是遊戲任務，不代表現實政治建議。\n"
+    );
+    println!(
         "選民結構：{} 個遊戲用選民原型；權重是可調模型參數，不代表實際人口或選民占比。",
         VOTER_SEGMENTS.len()
     );
@@ -353,6 +358,16 @@ fn run_interactive(game: &mut GameState) -> Result<(), String> {
         if let Some(event) = game.current_event() {
             println!("議題焦點：{} — {}", event.title, event.description);
         }
+        if let Some(objective) = game.current_objective() {
+            let progress = game.current_objective_progress();
+            let target = objective.target_actions;
+            let bar = "■".repeat(progress as usize)
+                + &"□".repeat(target.saturating_sub(progress) as usize);
+            println!(
+                "本週任務：{} [{}] {}/{} — {}",
+                objective.title, bar, progress, target, objective.description
+            );
+        }
         let actions: Vec<_> = actions_for(game.side)
             .iter()
             .copied()
@@ -416,12 +431,27 @@ fn run_auto(game: &mut GameState) {
     while !game.is_finished() {
         let preferred_id = preferred
             [(game.round as usize * DAYS_PER_WEEK as usize + game.day as usize) % preferred.len()];
-        let selected = actions
-            .iter()
-            .find(|action| {
-                action.id == preferred_id
-                    && action.cost <= game.budget
-                    && action_available(game, action.id)
+        let objective_action = game
+            .current_objective()
+            .filter(|objective| game.current_objective_progress() < objective.target_actions)
+            .and_then(|objective| {
+                objective.qualifying_actions.iter().find(|id| {
+                    actions.iter().any(|action| {
+                        action.id == **id
+                            && action.cost <= game.budget
+                            && action_available(game, action.id)
+                    })
+                })
+            })
+            .copied();
+        let selected = objective_action
+            .and_then(|id| actions.iter().find(|action| action.id == id))
+            .or_else(|| {
+                actions.iter().find(|action| {
+                    action.id == preferred_id
+                        && action.cost <= game.budget
+                        && action_available(game, action.id)
+                })
             })
             .or_else(|| {
                 actions
@@ -452,6 +482,19 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
     }
     if let Some(note) = &outcome.coordination_note {
         println!("  {note}");
+    }
+    if let Some(title) = outcome.objective_title {
+        let completion = if outcome.objective_completed && outcome.objective_reward > 0 {
+            format!("；達成，預算獎勵 +{}", outcome.objective_reward)
+        } else if outcome.objective_completed {
+            "；已達成，但預算已達上限".to_string()
+        } else {
+            String::new()
+        };
+        println!(
+            "  本週任務 {title}：{}/{}{}",
+            outcome.objective_progress, outcome.objective_target, completion
+        );
     }
     println!(
         "  信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100",
@@ -491,6 +534,11 @@ fn print_final(game: &mut GameState) -> ElectionOutcome {
         result.player_win_probability * 100.0
     );
     println!("這是遊戲隨機模型的結果，不是民調預測或真實選舉結果。\n");
+    println!(
+        "每週任務達成：{}/{}",
+        game.objectives_completed(),
+        CAMPAIGN_ROUNDS
+    );
     println!("=== 戰役操作評分（0–100；非遊戲品質評測）===");
     for (axis, score) in game.scorecard().axes() {
         let bars = "█".repeat((score / 5.0).round() as usize);
@@ -622,21 +670,38 @@ fn save_campaign_log(
     result: &ElectionOutcome,
     seed: u64,
 ) -> Result<(), String> {
-    let exists = Path::new(path).exists();
+    let log_path = Path::new(path);
+    let exists = log_path.exists();
+    let needs_header = !exists
+        || log_path
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .len()
+            == 0;
+    if exists && !needs_header {
+        let mut header = String::new();
+        BufReader::new(std::fs::File::open(log_path).map_err(|error| error.to_string())?)
+            .read_line(&mut header)
+            .map_err(|error| error.to_string())?;
+        if header.trim_end() != CAMPAIGN_LOG_HEADER {
+            return Err(
+                "戰役紀錄欄位與目前版本不同，請指定新的 --log 檔名以免混合格式。".to_string(),
+            );
+        }
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|error| format!("無法寫入戰役紀錄：{error}"))?;
-    if !exists {
-        writeln!(file, "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility")
-            .map_err(|error| error.to_string())?;
+    if needs_header {
+        writeln!(file, "{CAMPAIGN_LOG_HEADER}").map_err(|error| error.to_string())?;
     }
     let winner = &game.candidates[result.winner_index];
     let review = game.scorecard();
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
         game.campaign_year,
         if game.region.is_some() {
             "local"
@@ -652,6 +717,7 @@ fn save_campaign_log(
         seed,
         winner.party,
         result.player_win_probability,
+        game.objectives_completed(),
         review.policy,
         review.trust,
         review.mobilization,
