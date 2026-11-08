@@ -1,0 +1,613 @@
+use project_twn::history::{find_region, ELECTIONS, LEGISLATURE_SNAPSHOTS, REGIONS};
+use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
+use project_twn::sim::{
+    actions_for, ActionId, CampaignStyle, ElectionOutcome, GameState, Side, CAMPAIGN_ROUNDS,
+};
+use std::env;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::Path;
+
+struct Options {
+    year: u16,
+    role: Option<Side>,
+    style: CampaignStyle,
+    seed: u64,
+    auto: bool,
+    history: bool,
+    list_regions: bool,
+    region: Option<String>,
+    primary: bool,
+    log: Option<String>,
+}
+
+fn main() {
+    if let Err(message) = run() {
+        eprintln!("錯誤：{message}\n");
+        print_usage();
+        std::process::exit(2);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let options = parse_args()?;
+    if options.history {
+        print_history();
+        return Ok(());
+    }
+    if options.list_regions {
+        print_regions();
+        return Ok(());
+    }
+
+    let role = match options.role {
+        Some(role) => role,
+        None if options.auto => Side::Challenger,
+        None => ask_role()?,
+    };
+    let style = if options.primary {
+        run_primary(options.seed, options.auto)?
+    } else {
+        options.style
+    };
+    let region = match options.region.as_deref() {
+        Some(query) => Some(
+            find_region(query)
+                .ok_or_else(|| format!("找不到地方情境：{query}。使用 --regions 查看可選清單。"))?,
+        ),
+        None => None,
+    };
+    if region.is_some() && options.year != 2026 {
+        return Err("地方首長模式目前是 2026 前瞻情境，請使用 --year 2026。".to_string());
+    }
+    let mut game = match region {
+        Some(region) => {
+            GameState::new_local_with_style(options.year, role, options.seed, style, region)
+        }
+        None => GameState::new_with_style(options.year, role, options.seed, style),
+    };
+    print_intro(&game, options.seed);
+
+    if options.auto {
+        run_auto(&mut game);
+    } else {
+        run_interactive(&mut game)?;
+    }
+    let result = print_final(&mut game);
+    if let Some(path) = options.log.as_deref() {
+        save_campaign_log(path, &game, &result, options.seed)?;
+        println!("本場紀錄已追加至：{path}");
+    }
+    Ok(())
+}
+
+fn parse_args() -> Result<Options, String> {
+    let mut args = env::args().skip(1);
+    let mut options = Options {
+        year: 2026,
+        role: None,
+        style: CampaignStyle::Balanced,
+        seed: 2026,
+        auto: false,
+        history: false,
+        list_regions: false,
+        region: None,
+        primary: false,
+        log: None,
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "--history" => options.history = true,
+            "--regions" => options.list_regions = true,
+            "--auto" | "--demo" => options.auto = true,
+            "--primary" => options.primary = true,
+            "--region" => {
+                options.region = Some(
+                    args.next()
+                        .ok_or_else(|| "--region 後面需要縣市名稱或代碼".to_string())?,
+                )
+            }
+            "--log" => {
+                options.log = Some(
+                    args.next()
+                        .ok_or_else(|| "--log 後面需要 TSV 檔案路徑".to_string())?,
+                )
+            }
+            "--simulate" => {}
+            "--year" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--year 後面需要年份".to_string())?;
+                options.year = value.parse().map_err(|_| "年份必須是數字".to_string())?;
+            }
+            "--role" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--role 後面需要 incumbent 或 challenger".to_string())?;
+                options.role = Some(parse_role(&value)?);
+            }
+            "--style" => {
+                let value = args.next().ok_or_else(|| {
+                    "--style 後面需要 balanced、policy、organizer 或 communicator".to_string()
+                })?;
+                options.style = parse_style(&value)?;
+            }
+            "--seed" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--seed 後面需要整數".to_string())?;
+                options.seed = value
+                    .parse()
+                    .map_err(|_| "seed 必須是無號整數".to_string())?;
+            }
+            unexpected if !unexpected.starts_with('-') => {
+                options.year = unexpected
+                    .parse()
+                    .map_err(|_| format!("無法辨識的參數：{unexpected}"))?;
+            }
+            unknown => return Err(format!("不支援的參數：{unknown}")),
+        }
+    }
+    if !(1996..=2026).contains(&options.year) {
+        return Err("情境年份請選 1996–2026".to_string());
+    }
+    Ok(options)
+}
+
+fn parse_role(value: &str) -> Result<Side, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "incumbent" | "inc" | "執政" | "連任" => Ok(Side::Incumbent),
+        "challenger" | "opp" | "在野" | "挑戰" => Ok(Side::Challenger),
+        _ => Err(format!("角色請用 incumbent 或 challenger，收到：{value}")),
+    }
+}
+
+fn parse_style(value: &str) -> Result<CampaignStyle, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "balanced" | "均衡" => Ok(CampaignStyle::Balanced),
+        "policy" | "政策" => Ok(CampaignStyle::Policy),
+        "organizer" | "組織" => Ok(CampaignStyle::Organizer),
+        "communicator" | "溝通" => Ok(CampaignStyle::Communicator),
+        _ => Err(format!(
+            "風格請用 balanced、policy、organizer 或 communicator，收到：{value}"
+        )),
+    }
+}
+
+fn ask_role() -> Result<Side, String> {
+    loop {
+        println!("選擇陣營：1) 執政／尋求連任  2) 在野挑戰");
+        print!("請輸入 1 或 2：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        match input.trim() {
+            "1" => return Ok(Side::Incumbent),
+            "2" => return Ok(Side::Challenger),
+            _ => println!("請輸入 1 或 2。"),
+        }
+    }
+}
+
+fn print_intro(game: &GameState, seed: u64) {
+    println!("\n=== 臺灣選戰模擬器 | Project-TWN ===");
+    println!(
+        "情境年份：{}　陣營：{}　風格：{}　隨機種子：{}",
+        game.campaign_year,
+        game.side.label(),
+        game.style.label(),
+        seed
+    );
+    if let Some(region) = game.region {
+        println!(
+            "地方情境：{}；上屆首長政黨為 {}。",
+            region.name, region.previous_winner_party
+        );
+        println!(
+            "地方關注：{}。初始三黨比例為遊戲情境參數，不是該地實際得票率或民調。",
+            region.focus_label
+        );
+    } else {
+        println!(
+            "歷史基準：{} 年總統選舉，初始民調以當年全國得票率為基準。",
+            game.baseline_year
+        );
+    }
+    if game.region.is_none() && game.campaign_year != game.baseline_year {
+        println!("注意：這是以最近一次總統票作起點的替代情境，不是該年度的實際選舉結果。");
+    }
+    if game.campaign_year == 2026 {
+        if game.region.is_some() {
+            println!("2026地方選舉模式：2022年各地上屆首長政黨作為基準情境；2026投票日為 11-28，截至 11-08 尚無開票結果。" );
+        } else {
+            println!("2026全國代理情境：以2024總統票作全國基準，不是地方候選人或縣市民調；地方投票日為 2026-11-28。" );
+        }
+    }
+    println!("競選週數：{CAMPAIGN_ROUNDS}（布局／議題攻防／決戰三階段）　可用預算：{}　信任：{:.1}/100　體力：{:.1}/100", game.budget, game.trust, game.stamina);
+    println!(
+        "玩家能力值（遊戲建構，非歷史評分）：政策 {:.0}／組織 {:.0}／溝通 {:.0}\n",
+        game.player_attributes.policy,
+        game.player_attributes.organization,
+        game.player_attributes.communication
+    );
+
+    if !game.events.is_empty() {
+        println!("本情境公共議題（事件本身不預設政黨得失；回應方式才改變模擬民調）：");
+        for event in &game.events {
+            println!("  • {}：{}", event.year, event.title);
+        }
+        println!();
+    }
+    print_poll_table(game);
+    println!("\n行動的民調效果會受信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
+}
+
+fn print_poll_table(game: &GameState) {
+    println!("對比式：多候選人支持度（單一選票情境）");
+    for (index, candidate) in game.candidates.iter().enumerate() {
+        let marker = if index == game.player_index {
+            "▶"
+        } else {
+            " "
+        };
+        let bar = "█".repeat((game.polls[index] / 2.0).round() as usize);
+        println!(
+            "{marker} {:<22} {:>5.2}% {bar}",
+            candidate.name, game.polls[index]
+        );
+    }
+    if game.candidates.len() > 2 {
+        println!("互比式情境：若只比較玩家與單一對手，其他候選人的支持暫按各半轉移；這是遊戲簡化值，並非交叉民調。" );
+        for (index, candidate) in game
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != game.player_index)
+        {
+            let undecided = (100.0 - game.polls[game.player_index] - game.polls[index]).max(0.0);
+            let player_share = game.polls[game.player_index] + undecided * 0.5;
+            println!(
+                "  玩家 {:.1}% : {} {:.1}%",
+                player_share,
+                candidate.party,
+                100.0 - player_share
+            );
+        }
+    }
+}
+
+fn run_interactive(game: &mut GameState) -> Result<(), String> {
+    while !game.is_finished() {
+        println!(
+            "\n--- 第 {} / {} 週｜{} ---",
+            game.round + 1,
+            CAMPAIGN_ROUNDS,
+            game.phase_label()
+        );
+        println!(
+            "剩餘預算：{}　信任：{:.1}　動員：{:.1}　體力：{:.1}",
+            game.budget, game.trust, game.turnout_momentum, game.stamina
+        );
+        if let Some(event) = game.current_event() {
+            println!("議題焦點：{} — {}", event.title, event.description);
+        }
+        let actions: Vec<_> = actions_for(game.side)
+            .iter()
+            .copied()
+            .filter(|action| action.id != ActionId::PollCoordination || game.candidates.len() >= 3)
+            .collect();
+        for (index, action) in actions.iter().enumerate() {
+            println!(
+                "  {}) {}（費用 {}）— {}",
+                index + 1,
+                action.name,
+                action.cost,
+                action.description
+            );
+        }
+        print!("選行動（輸入編號，q 結束）：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        if input.trim().eq_ignore_ascii_case("q") {
+            break;
+        }
+        let choice: usize = match input.trim().parse() {
+            Ok(value) => value,
+            Err(_) => {
+                println!("請輸入行動編號。\n");
+                continue;
+            }
+        };
+        let Some(action) = actions.get(choice.saturating_sub(1)) else {
+            println!("沒有這個選項。\n");
+            continue;
+        };
+        match game.apply_action(action.id) {
+            Ok(outcome) => print_action_outcome(game, &outcome),
+            Err(message) => println!("{message}\n"),
+        }
+    }
+    Ok(())
+}
+
+fn run_auto(game: &mut GameState) {
+    let actions = actions_for(game.side);
+    let preferred = match game.side {
+        Side::Incumbent => [
+            ActionId::PolicyDelivery,
+            ActionId::CrisisResponse,
+            ActionId::TransparencyReport,
+            ActionId::PublicServices,
+            ActionId::PollCoordination,
+        ],
+        Side::Challenger => [
+            ActionId::CommunityTour,
+            ActionId::PolicyForum,
+            ActionId::LegalAssembly,
+            ActionId::CoalitionTalks,
+            ActionId::PollCoordination,
+        ],
+    };
+    while !game.is_finished() {
+        let preferred_id = preferred[game.round as usize % preferred.len()];
+        let selected = actions
+            .iter()
+            .find(|action| {
+                action.id == preferred_id
+                    && action.cost <= game.budget
+                    && (action.id != ActionId::PollCoordination || game.candidates.len() >= 3)
+            })
+            .or_else(|| {
+                actions.iter().find(|action| {
+                    action.cost <= game.budget
+                        && (action.id != ActionId::PollCoordination || game.candidates.len() >= 3)
+                })
+            });
+        let Some(action) = selected else { break };
+        if let Ok(outcome) = game.apply_action(action.id) {
+            print_action_outcome(game, &outcome);
+        }
+    }
+}
+
+fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
+    println!(
+        "✓ {}：玩家民調 {:.2}% → {:.2}%（費用 {}、週資金 +{}、餘額 {}）",
+        outcome.action_name,
+        outcome.share_before,
+        outcome.share_after,
+        outcome.cost,
+        outcome.weekly_funding,
+        outcome.budget_after
+    );
+    if let Some(event) = outcome.event_title {
+        println!("  對應公共議題：{event}");
+    }
+    if let Some(note) = &outcome.coordination_note {
+        println!("  {note}");
+    }
+    println!(
+        "  信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100",
+        outcome.trust_after, outcome.turnout_after, outcome.stamina_after
+    );
+    print_poll_table(game);
+}
+
+fn print_final(game: &mut GameState) -> ElectionOutcome {
+    let result = game.finish();
+    let winner = &game.candidates[result.winner_index];
+    println!("\n=== 情境開票（單次模擬）===");
+    for (index, candidate) in game.candidates.iter().enumerate() {
+        let mark = if index == result.winner_index {
+            "★"
+        } else {
+            " "
+        };
+        println!(
+            "{mark} {:<22} {:>5.2}%",
+            candidate.name, result.shares[index]
+        );
+    }
+    println!("\n情境勝選者：{}（{}）", winner.name, winner.party);
+    println!(
+        "玩家在 1,200 次小幅終盤誤差抽樣中的勝選率：{:.1}%",
+        result.player_win_probability * 100.0
+    );
+    println!("這是遊戲隨機模型的結果，不是民調預測或真實選舉結果。\n");
+    println!("=== 戰役檢討雷達（0–100）===");
+    for (axis, score) in game.review().axes() {
+        let bars = "█".repeat((score / 5.0).round() as usize);
+        println!("  {axis:<8} {score:>5.1} {bars}");
+    }
+    let review = game.review();
+    let balanced = review.axes().iter().all(|(_, score)| *score >= 65.0);
+    println!(
+        "稱號：{}",
+        if balanced {
+            "全能競選團隊"
+        } else if review.versatility >= 70.0 {
+            "議題百變團隊"
+        } else if review.mobilization >= 65.0 {
+            "組織動員團隊"
+        } else {
+            "持續累積中"
+        }
+    );
+    result
+}
+
+fn run_primary(seed: u64, auto: bool) -> Result<CampaignStyle, String> {
+    let mut primary = PrimaryContest::new(seed ^ 0xA11C_E5ED);
+    println!("\n=== 黨內初選：提名之爭 ===");
+    println!("三位虛構提名路線：政策派、組織派、溝通派。先完成 {PRIMARY_ROUNDS} 回合初選，再進入十二週大選。\n");
+    print_primary_polls(&primary);
+    while !primary.is_finished() {
+        println!(
+            "\n--- 初選第 {} / {} 回合 ---",
+            primary.round + 1,
+            PRIMARY_ROUNDS
+        );
+        println!(
+            "  1) 政策論壇　2) 地方組織行程　3) 公開溝通活動　4) 對比／互比式民調　5) 初選整合協商"
+        );
+        let choice = if auto {
+            [
+                PrimaryChoice::PolicyDebate,
+                PrimaryChoice::OrganizerVisit,
+                PrimaryChoice::ComparisonPoll,
+                PrimaryChoice::UnityNegotiation,
+            ][primary.round as usize]
+        } else {
+            loop {
+                print!("選擇策略：");
+                io::stdout().flush().map_err(|error| error.to_string())?;
+                let mut input = String::new();
+                io::stdin()
+                    .read_line(&mut input)
+                    .map_err(|error| error.to_string())?;
+                let selected = match input.trim() {
+                    "1" => Some(PrimaryChoice::PolicyDebate),
+                    "2" => Some(PrimaryChoice::OrganizerVisit),
+                    "3" => Some(PrimaryChoice::CommunicationForum),
+                    "4" => Some(PrimaryChoice::ComparisonPoll),
+                    "5" => Some(PrimaryChoice::UnityNegotiation),
+                    _ => None,
+                };
+                if let Some(selected) = selected {
+                    break selected;
+                }
+                println!("請輸入 1–5。");
+            }
+        };
+        primary.apply(choice)?;
+        println!("採取：{}", choice.label());
+        print_primary_polls(&primary);
+    }
+    let nominee = primary.nominee_index();
+    let style = primary.nominee_style();
+    println!(
+        "\n初選提名：{}（支持度 {:.1}%），以此路線進入大選。\n",
+        PrimaryContest::name(nominee),
+        primary.polls[nominee]
+    );
+    Ok(style)
+}
+
+fn print_primary_polls(primary: &PrimaryContest) {
+    println!("對比式初選支持度");
+    for index in 0..3 {
+        println!(
+            "  {:<5} {:>5.1}%",
+            PrimaryContest::name(index),
+            primary.polls[index]
+        );
+    }
+    println!("互比式初選（未入互比者支持各半轉移；簡化情境值）");
+    for (left, right, left_share) in primary.head_to_head() {
+        println!(
+            "  {} {:.1}% : {} {:.1}%",
+            PrimaryContest::name(left),
+            left_share,
+            PrimaryContest::name(right),
+            100.0 - left_share
+        );
+    }
+}
+
+fn print_regions() {
+    println!("可選地方情境（上屆首長政黨依 2022 地方選舉；議題標籤是遊戲情境設定）\n");
+    for (index, region) in REGIONS.iter().enumerate() {
+        println!(
+            "  {:>2}. {:<5} {:<8} 上屆：{}　焦點：{}",
+            index + 1,
+            region.key,
+            region.name,
+            region.previous_winner_party,
+            region.focus_label
+        );
+    }
+}
+
+fn save_campaign_log(
+    path: &str,
+    game: &GameState,
+    result: &ElectionOutcome,
+    seed: u64,
+) -> Result<(), String> {
+    let exists = Path::new(path).exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| format!("無法寫入戰役紀錄：{error}"))?;
+    if !exists {
+        writeln!(file, "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility")
+            .map_err(|error| error.to_string())?;
+    }
+    let winner = &game.candidates[result.winner_index];
+    let review = game.review();
+    writeln!(
+        file,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+        game.campaign_year,
+        if game.region.is_some() {
+            "local"
+        } else {
+            "presidential"
+        },
+        game.region
+            .map(|region| region.name)
+            .unwrap_or("-")
+            .replace('\t', " "),
+        game.side.label(),
+        game.style.label(),
+        seed,
+        winner.party,
+        result.player_win_probability,
+        review.policy,
+        review.trust,
+        review.mobilization,
+        review.event_response,
+        review.resource_management,
+        review.versatility
+    )
+    .map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn print_history() {
+    println!("臺灣總統副總統直選結果（中選會資料；列出得票率）\n");
+    for election in ELECTIONS {
+        println!(
+            "{} ({})　當時執政黨：{}",
+            election.year, election.date, election.incumbent_party
+        );
+        for candidate in election.candidates {
+            println!(
+                "  {:<8} {:<7} {:>7}  {:>5.2}%",
+                candidate.president, candidate.party, candidate.votes, candidate.share_pct
+            );
+        }
+    }
+    println!("\n立法院關鍵席次節點");
+    for snapshot in LEGISLATURE_SNAPSHOTS {
+        println!("  {}：{}", snapshot.year, snapshot.summary);
+    }
+    println!(
+        "\n2026：地方公職人員選舉投票日為 2026-11-28；截至 2026-11-08 尚未投票，故不列結果。\n"
+    );
+}
+
+fn print_usage() {
+    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --simulate [年份] [--region 縣市] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --primary --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n\n年份範圍：1996–2026。地方模式可用 --regions 查看22縣市，2026情境只把2022首長政黨作參考，得票比例為遊戲設定。--primary 先進行四回合黨內初選；一般競選共12回合。每週有資金補給。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可把每場結果與雷達分數附加到 TSV，便於保存長期戰績。");
+}
