@@ -40,7 +40,7 @@ jobs:
           $rows = @(Get-Content target/ci-batch-runs.tsv)
           if ($rows.Count -ne 9) { throw "Expected a header and 8 style/seed rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 23) { throw "Unexpected batch TSV column count." }
+            if ($row.Split("`t").Count -ne 25) { throw "Unexpected batch TSV column count." }
           }
 
       - name: Smoke-test paired parameter sensitivity
@@ -49,5 +49,14 @@ jobs:
           $rows = @(Get-Content target/ci-sensitivity-runs.tsv)
           if ($rows.Count -ne 31) { throw "Expected a header and 30 one-factor rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 23) { throw "Unexpected sensitivity TSV column count." }
+            if ($row.Split("`t").Count -ne 25) { throw "Unexpected sensitivity TSV column count." }
+          }
+
+      - name: Smoke-test paired parameter interaction sensitivity
+        run: |
+          cargo run -- --batch 1 --year 2026 --region 臺北市 --role challenger --seed 77 --interaction-sensitivity --batch-log target/ci-interaction-runs.tsv
+          $rows = @(Get-Content target/ci-interaction-runs.tsv)
+          if ($rows.Count -ne 85) { throw "Expected a header and 84 two-factor corner rows; got $($rows.Count)." }
+          foreach ($row in $rows) {
+            if ($row.Split("`t").Count -ne 25) { throw "Unexpected interaction TSV column count." }
           }

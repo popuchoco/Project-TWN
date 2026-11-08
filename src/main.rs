@@ -14,9 +14,10 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\tsensitivity_parameter_2\tmultiplier_2";
 const MAX_BATCH_RUNS: u32 = 10_000;
 const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
+const MAX_INTERACTION_SENSITIVITY_SEEDS: u32 = 100;
 
 struct Options {
     year: u16,
@@ -34,6 +35,7 @@ struct Options {
     batch: Option<u32>,
     sweep_styles: bool,
     sensitivity: bool,
+    interaction_sensitivity: bool,
     batch_log: Option<String>,
 }
 
@@ -201,6 +203,7 @@ fn parse_args() -> Result<Options, String> {
         batch: None,
         sweep_styles: false,
         sensitivity: false,
+        interaction_sensitivity: false,
         batch_log: None,
     };
     while let Some(arg) = args.next() {
@@ -244,6 +247,7 @@ fn parse_args() -> Result<Options, String> {
             }
             "--sweep-styles" => options.sweep_styles = true,
             "--sensitivity" => options.sensitivity = true,
+            "--interaction-sensitivity" => options.interaction_sensitivity = true,
             "--batch-log" => {
                 options.batch_log = Some(
                     args.next()
@@ -301,6 +305,23 @@ fn parse_args() -> Result<Options, String> {
     }
     if options.sensitivity && options.sweep_styles {
         return Err("--sensitivity 與 --sweep-styles 是不同比較設計，請分開執行。".to_string());
+    }
+    if options.interaction_sensitivity && options.batch.is_none() {
+        return Err("--interaction-sensitivity 必須搭配 --batch 使用。".to_string());
+    }
+    if options.interaction_sensitivity && (options.sweep_styles || options.sensitivity) {
+        return Err(
+            "--interaction-sensitivity 請與 --sweep-styles、--sensitivity 分開執行。".to_string(),
+        );
+    }
+    if options.interaction_sensitivity
+        && options
+            .batch
+            .is_some_and(|runs| runs > MAX_INTERACTION_SENSITIVITY_SEEDS)
+    {
+        return Err(format!(
+            "二因子交互作用敏感度每個情境最多使用 {MAX_INTERACTION_SENSITIVITY_SEEDS} 個 seed。"
+        ));
     }
     if options.sensitivity
         && options
@@ -588,6 +609,8 @@ struct BatchRecord {
     seed: u64,
     sensitivity_parameter: &'static str,
     multiplier: f64,
+    sensitivity_parameter_2: &'static str,
+    multiplier_2: f64,
     winner_candidate: String,
     winner_party: String,
     player_party: String,
@@ -619,6 +642,9 @@ fn run_batch(
     region: Option<&'static RegionProfile>,
     selected_party: Option<&'static PartyProfile>,
 ) -> Result<(), String> {
+    if options.interaction_sensitivity {
+        return run_interaction_sensitivity_batch(options, runs, role, region, selected_party);
+    }
     if options.sensitivity {
         return run_sensitivity_batch(options, runs, role, region, selected_party);
     }
@@ -653,6 +679,8 @@ fn run_batch(
                 seed,
                 ModelParameters::default(),
                 "baseline",
+                1.0,
+                "none",
                 1.0,
             ));
         }
@@ -694,6 +722,8 @@ fn simulate_batch_record(
     model_parameters: ModelParameters,
     sensitivity_parameter: &'static str,
     multiplier: f64,
+    sensitivity_parameter_2: &'static str,
+    multiplier_2: f64,
 ) -> BatchRecord {
     let mut game = new_scenario_game(scenario, seed, model_parameters);
     run_auto(&mut game, false);
@@ -713,6 +743,8 @@ fn simulate_batch_record(
         seed,
         sensitivity_parameter,
         multiplier,
+        sensitivity_parameter_2,
+        multiplier_2,
         winner_candidate: winner.name.clone(),
         winner_party: winner.party.to_string(),
         player_party: player.party.to_string(),
@@ -755,6 +787,8 @@ fn run_sensitivity_batch(
             ModelParameters::default(),
             "baseline",
             1.0,
+            "none",
+            1.0,
         ));
     }
     for parameter in SensitivityParameter::ALL {
@@ -770,6 +804,8 @@ fn run_sensitivity_batch(
                     model_parameters,
                     parameter.key(),
                     multiplier,
+                    "none",
+                    1.0,
                 ));
             }
         }
@@ -842,6 +878,154 @@ fn run_sensitivity_batch(
         println!("逐場原始結果已追加至：{path}");
     }
     Ok(())
+}
+
+fn run_interaction_sensitivity_batch(
+    options: &Options,
+    runs: u32,
+    role: Side,
+    region: Option<&'static RegionProfile>,
+    selected_party: Option<&'static PartyProfile>,
+) -> Result<(), String> {
+    let last_seed = options
+        .seed
+        .checked_add(u64::from(runs - 1))
+        .ok_or_else(|| "seed 範圍超出 u64 上限。".to_string())?;
+    let scenario = BatchScenario {
+        options,
+        role,
+        style: options.style,
+        region,
+        selected_party,
+    };
+    let parameter_pairs =
+        SensitivityParameter::ALL.len() * (SensitivityParameter::ALL.len() - 1) / 2;
+    let mut records = Vec::with_capacity(runs as usize * parameter_pairs * 4);
+
+    for (first_index, first) in SensitivityParameter::ALL.iter().copied().enumerate() {
+        for second in SensitivityParameter::ALL
+            .iter()
+            .copied()
+            .skip(first_index + 1)
+        {
+            for (first_multiplier, second_multiplier) in
+                [(0.8, 0.8), (0.8, 1.2), (1.2, 0.8), (1.2, 1.2)]
+            {
+                let model_parameters = ModelParameters::default()
+                    .with_multiplier(first, first_multiplier)
+                    .and_then(|parameters| parameters.with_multiplier(second, second_multiplier))
+                    .map_err(str::to_string)?;
+                for offset in 0..runs {
+                    records.push(simulate_batch_record(
+                        &scenario,
+                        options.seed + u64::from(offset),
+                        model_parameters,
+                        first.key(),
+                        first_multiplier,
+                        second.key(),
+                        second_multiplier,
+                    ));
+                }
+            }
+        }
+    }
+
+    println!("=== 模型參數二因子交互作用敏感度（0.8×／1.2× 2×2 配對）===");
+    println!(
+        "情境：{} 年、{}、{}、{}；配對 seed：{}–{}；每組 {} 場、共 {} 組參數交互作用。",
+        options.year,
+        role.label(),
+        region.map(|value| value.name).unwrap_or("總統全國情境"),
+        options.style.label(),
+        options.seed,
+        last_seed,
+        runs,
+        parameter_pairs
+    );
+    if let Some(party) = selected_party {
+        println!("玩家政黨情境：{}。", party.name);
+    }
+
+    for (first_index, first) in SensitivityParameter::ALL.iter().copied().enumerate() {
+        for second in SensitivityParameter::ALL
+            .iter()
+            .copied()
+            .skip(first_index + 1)
+        {
+            let corners_by_seed = interaction_corners(&records, first, second);
+            let paired = corners_by_seed
+                .values()
+                .filter_map(|corners| Some([corners[0]?, corners[1]?, corners[2]?, corners[3]?]))
+                .collect::<Vec<_>>();
+            let count = paired.len() as f64;
+            let share_contrast = paired
+                .iter()
+                .map(|corners| {
+                    factorial_interaction(
+                        corners[0].player_final_share,
+                        corners[1].player_final_share,
+                        corners[2].player_final_share,
+                        corners[3].player_final_share,
+                    )
+                })
+                .sum::<f64>()
+                / count;
+            let probability_contrast = paired
+                .iter()
+                .map(|corners| {
+                    factorial_interaction(
+                        corners[0].player_win_probability,
+                        corners[1].player_win_probability,
+                        corners[2].player_win_probability,
+                        corners[3].player_win_probability,
+                    )
+                })
+                .sum::<f64>()
+                / count;
+            println!(
+                "{} × {}：終局支持 ΔΔ {:+.3} 個百分點｜模型內勝率 ΔΔ {:+.3} 個百分點｜完整配對 seed {}",
+                first.label(),
+                second.label(),
+                share_contrast,
+                probability_contrast * 100.0,
+                paired.len()
+            );
+        }
+    }
+    println!("ΔΔ 是四個配對角點的差中差，用於檢查兩項倍率同時變動時是否偏離可加效果；這是模型內方向性檢查，不代表真實選舉因果或校準係數。每個 seed 執行 84 場，模式最多 100 個 seed。");
+
+    if let Some(path) = options.batch_log.as_deref() {
+        save_batch_log(path, options, role, region, &records)?;
+        println!("逐場原始結果已追加至：{path}");
+    }
+    Ok(())
+}
+
+fn interaction_corners(
+    records: &[BatchRecord],
+    first: SensitivityParameter,
+    second: SensitivityParameter,
+) -> HashMap<u64, [Option<&BatchRecord>; 4]> {
+    let mut corners_by_seed = HashMap::new();
+    for record in records.iter().filter(|record| {
+        record.sensitivity_parameter == first.key()
+            && record.sensitivity_parameter_2 == second.key()
+    }) {
+        let first_high = (record.multiplier - 1.2).abs() < f64::EPSILON;
+        let second_high = (record.multiplier_2 - 1.2).abs() < f64::EPSILON;
+        let corner = match (first_high, second_high) {
+            (false, false) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (true, true) => 3,
+        };
+        corners_by_seed.entry(record.seed).or_insert([None; 4])[corner] = Some(record);
+    }
+    corners_by_seed
+}
+
+fn factorial_interaction(low_low: f64, low_high: f64, high_low: f64, high_high: f64) -> f64 {
+    high_high - high_low - low_high + low_low
 }
 
 fn batch_metrics(group: &[&BatchRecord]) -> BatchMetrics {
@@ -940,7 +1124,7 @@ fn save_batch_log(
         let review = record.scorecard;
         writeln!(
             file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{:.2}",
             options.year,
             mode,
             tsv_cell(region_name),
@@ -963,7 +1147,9 @@ fn save_batch_log(
             review.policy,
             review.event_response,
             review.resource_management,
-            review.versatility
+            review.versatility,
+            record.sensitivity_parameter_2,
+            record.multiplier_2
         )
         .map_err(|error| error.to_string())?;
     }
@@ -1284,7 +1470,7 @@ fn print_usage() {
   project-twn --parties
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
-  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--sweep-styles | --sensitivity]
+  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--sweep-styles | --sensitivity | --interaction-sensitivity]
       [--year 年份] [--region 縣市] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
 
 範例：
@@ -1292,11 +1478,12 @@ fn print_usage() {
   cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sensitivity --batch-log sensitivity.tsv
+  cargo run -- --batch 10 --year 2024 --role challenger --seed 1000 --interaction-sensitivity --batch-log interactions.tsv
 
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 省略單場模式的 --role 會詢問陣營；--auto 以固定示範策略跑完。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
-批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
+批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
     );
 }
 
@@ -1311,6 +1498,23 @@ mod tests {
         assert_eq!(percentile(&values, 0.50), 20.0);
         assert_eq!(percentile(&values, 0.90), 40.0);
         assert_eq!(percentile(&[], 0.50), 0.0);
+    }
+
+    #[test]
+    fn factorial_interaction_is_zero_for_additive_effects() {
+        let low_low = 10.0;
+        let low_high = 13.0;
+        let high_low = 12.0;
+        let high_high = 15.0;
+        assert_eq!(
+            factorial_interaction(low_low, low_high, high_low, high_high),
+            0.0
+        );
+    }
+
+    #[test]
+    fn factorial_interaction_detects_joint_effect() {
+        assert_eq!(factorial_interaction(0.0, 0.0, 0.0, 4.0), 4.0);
     }
 
     #[test]
