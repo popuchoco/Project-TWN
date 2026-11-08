@@ -1288,6 +1288,12 @@ fn run_auto_mode(
         }
         if !staffer_mode {
             if let Some(beat) = game.current_story_beat() {
+                if show_progress {
+                    println!("\n【多週情境｜第 {} 週】{}", beat.week, beat.title);
+                    println!("登場人物：{}", beat.character);
+                    println!("{}", beat.scene);
+                    println!("（情境與人物為虛構合成素材；選擇會影響遊戲資源與後續敘事。）");
+                }
                 let selected = beat
                     .choices
                     .iter()
@@ -1314,6 +1320,9 @@ fn run_auto_mode(
                     }
                 } else {
                     let _ = game.skip_story_beat();
+                    if show_progress {
+                        println!("本段情境因預算不足而暫不處理；後續劇情仍會依目前進度展開。\n");
+                    }
                 }
             }
         }
