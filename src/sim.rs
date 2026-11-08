@@ -4,6 +4,10 @@ use crate::history::{
     party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
     VOTER_SEGMENTS,
 };
+use crate::staffer::{
+    brief_for_round as staffer_brief_for_round, continuity_bonus as staffer_continuity_bonus,
+    StafferBrief, StafferDecision, StafferProgress,
+};
 use crate::story::{
     beat_for_round, choice_for, coherence_bonus, StoryBeat, StoryDecision, StoryProgress,
 };
@@ -32,6 +36,7 @@ pub enum GameError {
     HeadquartersAlreadyEstablished,
     SupportersAssociationAlreadyEstablished,
     StoryChoiceUnavailable,
+    StafferDecisionUnavailable,
 }
 
 impl fmt::Display for GameError {
@@ -57,6 +62,9 @@ impl fmt::Display for GameError {
             }
             Self::StoryChoiceUnavailable => {
                 formatter.write_str("目前沒有可處理的故事情境，或所選解法無效。")
+            }
+            Self::StafferDecisionUnavailable => {
+                formatter.write_str("目前沒有可處理的幕僚會議，或所選方案無效。")
             }
         }
     }
@@ -1039,6 +1047,7 @@ pub struct GameState {
     pub poll_taken_this_week: bool,
     pub coalition_this_week: bool,
     pub story_progress: StoryProgress,
+    pub staffer_progress: StafferProgress,
     final_outcome: Option<ElectionOutcome>,
     rng: Rng,
 }
@@ -1085,6 +1094,21 @@ pub struct StoryOutcome {
     pub mobilization_after: f64,
     pub stamina_after: f64,
     pub budget_after: i32,
+    pub note: Option<&'static str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StafferOutcome {
+    pub title: &'static str,
+    pub choice_label: &'static str,
+    pub support_before: f64,
+    pub support_after: f64,
+    pub support_delta: f64,
+    pub trust_after: f64,
+    pub mobilization_after: f64,
+    pub stamina_after: f64,
+    pub budget_after: i32,
+    pub event_match: bool,
     pub note: Option<&'static str>,
 }
 
@@ -1421,6 +1445,7 @@ impl GameState {
             poll_taken_this_week: false,
             coalition_this_week: false,
             story_progress: StoryProgress::default(),
+            staffer_progress: StafferProgress::default(),
             final_outcome: None,
             rng,
         }
@@ -1511,6 +1536,98 @@ impl GameState {
             .record(beat.index, StoryDecision::Skipped)
         {
             return Err(GameError::StoryChoiceUnavailable);
+        }
+        Ok(())
+    }
+
+    pub fn current_staffer_brief(&self) -> Option<StafferBrief> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS || self.day != 0 {
+            return None;
+        }
+        staffer_brief_for_round(self.round, self.staffer_progress)
+    }
+
+    /// Resolve a staffer-mode planning choice without consuming one of the 84 daily turns.
+    pub fn apply_staffer_choice(
+        &mut self,
+        choice_index: usize,
+    ) -> Result<StafferOutcome, GameError> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS || self.day != 0 {
+            return Err(GameError::StafferDecisionUnavailable);
+        }
+        let brief = self
+            .current_staffer_brief()
+            .ok_or(GameError::StafferDecisionUnavailable)?;
+        let choice = *brief
+            .choices
+            .get(choice_index)
+            .ok_or(GameError::StafferDecisionUnavailable)?;
+        if self.budget < choice.budget_cost {
+            return Err(GameError::InsufficientBudget {
+                required: choice.budget_cost,
+                available: self.budget,
+            });
+        }
+        let continuity = staffer_continuity_bonus(brief.index, &choice, self.staffer_progress);
+        let event_match = self
+            .current_event()
+            .is_some_and(|event| event.issue == choice.issue);
+        let event_support_bonus = if event_match { 0.04 } else { 0.0 };
+        let event_trust_bonus = if event_match { 0.2 } else { 0.0 };
+        let support_before = self.polls[self.player_index];
+        if !self.staffer_progress.record(
+            brief.index,
+            StafferDecision::Chosen(choice.id),
+            choice.focus,
+        ) {
+            return Err(GameError::StafferDecisionUnavailable);
+        }
+        self.budget -= choice.budget_cost;
+        self.apply_segment_swing(
+            self.player_index,
+            choice.support_delta + continuity.support_delta + event_support_bonus,
+            &[],
+        );
+        self.trust = (self.trust + choice.trust_delta + continuity.trust_delta + event_trust_bonus)
+            .clamp(0.0, 100.0);
+        self.turnout_momentum =
+            (self.turnout_momentum + choice.mobilization_delta).clamp(0.0, 100.0);
+        self.stamina = (self.stamina + choice.stamina_delta).clamp(0.0, 100.0);
+        let support_after = self.polls[self.player_index];
+        let note = if continuity.note.is_some() {
+            continuity.note
+        } else if event_match {
+            Some("方案呼應本週事件議題，獲得小幅遊戲內契合加成。")
+        } else {
+            None
+        };
+        Ok(StafferOutcome {
+            title: brief.title,
+            choice_label: choice.label,
+            support_before,
+            support_after,
+            support_delta: support_after - support_before,
+            trust_after: self.trust,
+            mobilization_after: self.turnout_momentum,
+            stamina_after: self.stamina,
+            budget_after: self.budget,
+            event_match,
+            note,
+        })
+    }
+
+    pub fn skip_staffer_brief(&mut self) -> Result<(), GameError> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS || self.day != 0 {
+            return Err(GameError::StafferDecisionUnavailable);
+        }
+        let brief = self
+            .current_staffer_brief()
+            .ok_or(GameError::StafferDecisionUnavailable)?;
+        if !self
+            .staffer_progress
+            .record(brief.index, StafferDecision::Skipped, None)
+        {
+            return Err(GameError::StafferDecisionUnavailable);
         }
         Ok(())
     }
@@ -2136,6 +2253,11 @@ impl GameState {
         if !self.story_progress.is_valid(self.round) {
             return Err(
                 "story choices must follow the campaign schedule and their valid choice sets",
+            );
+        }
+        if !self.staffer_progress.is_valid(self.round) {
+            return Err(
+                "staffer decisions must follow the campaign schedule and their valid choice sets",
             );
         }
         match self.setup.timeline {
@@ -3052,6 +3174,53 @@ mod tests {
         assert_eq!(game.story_progress.completed_beats(), 1);
         assert!(game.current_story_beat().is_none());
         assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn staffer_choices_are_weekly_non_daily_decisions_with_game_effects() {
+        let mut game = GameState::new(2024, Side::Challenger, 717);
+        let starting_round = game.round;
+        let starting_day = game.day;
+        let starting_support = game.polls[game.player_index];
+        let first = game.current_staffer_brief().unwrap();
+        assert_eq!(first.week, 1);
+        let outcome = game.apply_staffer_choice(1).unwrap();
+        assert!(outcome.support_delta > 0.0);
+        assert_eq!(game.polls[game.player_index], outcome.support_after);
+        assert_eq!(game.round, starting_round);
+        assert_eq!(game.day, starting_day);
+        assert!(game.polls[game.player_index] > starting_support);
+        assert!(game.current_staffer_brief().is_none());
+        assert!(matches!(
+            game.apply_staffer_choice(0),
+            Err(GameError::StafferDecisionUnavailable)
+        ));
+        game.validate().unwrap();
+
+        for _ in 0..(DAYS_PER_WEEK * 2) {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        let third_week = game.current_staffer_brief().unwrap();
+        assert_eq!(third_week.week, 3);
+        assert!(third_week.scene.contains("誠信") || third_week.scene.contains("資料"));
+        game.skip_staffer_brief().unwrap();
+        assert!(game.current_staffer_brief().is_none());
+        game.validate().unwrap();
+    }
+
+    #[test]
+    fn staffer_choice_rejects_unaffordable_plans_without_advancing() {
+        let mut game = GameState::new(2024, Side::Challenger, 818);
+        game.budget = 0;
+        let before_support = game.polls[game.player_index];
+        assert!(matches!(
+            game.apply_staffer_choice(0),
+            Err(GameError::InsufficientBudget { .. })
+        ));
+        assert_eq!(game.round, 0);
+        assert_eq!(game.day, 0);
+        assert_eq!(game.polls[game.player_index], before_support);
+        assert!(game.current_staffer_brief().is_some());
     }
 
     #[test]

@@ -121,7 +121,23 @@ jobs:
           if ($rows.Count -ne 2) { throw "Expected one campaign record and one header." }
           $headers = $rows[0].Split("`t")
           $values = $rows[1].Split("`t")
-          if ($values.Count -ne 22) { throw "Unexpected campaign TSV column count." }
+          if ($values.Count -ne 23) { throw "Unexpected campaign TSV column count." }
           $storyIndex = [Array]::IndexOf($headers, "story_path")
           if ($storyIndex -lt 0 -or $values[$storyIndex] -notmatch ".+>.+>.+") { throw "Campaign log omitted the resolved story path." }
           if (-not (Get-Content target/ci-story-output.txt -Raw).Contains("雨後一條路")) { throw "Automatic play omitted the story arc." }
+
+      - name: Smoke-test staffer mode and daily story scenes
+        run: |
+          cargo run -- --year 2024 --role challenger --staffer --auto --seed 909 --log target/ci-staffer.tsv | Out-File -Encoding utf8 target/ci-staffer-output.txt
+          $rows = @(Get-Content target/ci-staffer.tsv)
+          if ($rows.Count -ne 2) { throw "Expected one staffer campaign record and one header." }
+          $headers = $rows[0].Split("`t")
+          $values = $rows[1].Split("`t")
+          if ($values.Count -ne 23) { throw "Unexpected staffer campaign TSV column count." }
+          $routeIndex = [Array]::IndexOf($headers, "staffer_path")
+          if ($routeIndex -lt 0 -or $values[$routeIndex].Split(">").Count -ne 7) { throw "Staffer log omitted the focus and six briefing decisions." }
+          $output = Get-Content target/ci-staffer-output.txt -Raw
+          if ([regex]::Matches($output, "今日選戰").Count -ne 84) { throw "Staffer mode should narrate all 84 daily campaign scenes." }
+          if ([regex]::Matches($output, "幕僚會議").Count -ne 6) { throw "Staffer mode should resolve six strategic briefings." }
+          if (-not $output.Contains("候選人支持度檢視（遊戲模型值，非實際民調）")) { throw "Staffer poll briefing omitted its model-only label." }
+          if (-not $output.Contains("幕僚模式回顧")) { throw "Staffer campaign omitted its closing recap." }

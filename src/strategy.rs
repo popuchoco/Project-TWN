@@ -3,7 +3,10 @@
 //! Recommendation scores are decision heuristics over this game's modeled
 //! support, context, and resources. They are not empirical vote estimates.
 
-use crate::sim::{campaign_actions_for, ActionPreview, GameError, GameState, TacticCategory};
+use crate::sim::{
+    campaign_actions_for, ActionId, ActionPreview, GameError, GameState, TacticCategory,
+};
+use crate::staffer::CampaignFocus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrategyProfile {
@@ -176,6 +179,10 @@ impl StrategyEngine {
         self
     }
 
+    pub fn with_campaign_focus(self, focus: CampaignFocus) -> Self {
+        self.with_module(Box::new(CampaignFocusModule { focus }))
+    }
+
     pub fn profile(&self) -> StrategyProfile {
         self.profile
     }
@@ -221,6 +228,68 @@ impl StrategyEngine {
             .into_iter()
             .next()
             .ok_or(GameError::ActionUnavailable)
+    }
+}
+
+struct CampaignFocusModule {
+    focus: CampaignFocus,
+}
+
+impl CampaignFocusModule {
+    fn supports_focus(&self, action: ActionId) -> bool {
+        match self.focus {
+            CampaignFocus::Livelihood => matches!(
+                action,
+                ActionId::CrisisResponse
+                    | ActionId::PublicServices
+                    | ActionId::CommunityTour
+                    | ActionId::VolunteerCanvassing
+                    | ActionId::StreetSweep
+                    | ActionId::VulnerableCommunityCare
+                    | ActionId::DisasterResponseVisit
+            ),
+            CampaignFocus::OpenGovernment => matches!(
+                action,
+                ActionId::PolicyDelivery
+                    | ActionId::TransparencyReport
+                    | ActionId::PolicyForum
+                    | ActionId::Debate
+                    | ActionId::MediaInterview
+                    | ActionId::PolicyPresentation
+                    | ActionId::FactCheckResponse
+            ),
+            CampaignFocus::DemocraticResilience => matches!(
+                action,
+                ActionId::LegalAssembly
+                    | ActionId::CoalitionTalks
+                    | ActionId::OversightPetition
+                    | ActionId::PollCoordination
+                    | ActionId::VolunteerCanvassing
+                    | ActionId::SupportersAssociation
+            ),
+        }
+    }
+}
+
+impl StrategyModule for CampaignFocusModule {
+    fn axis(&self) -> StrategyAxis {
+        StrategyAxis::Context
+    }
+
+    fn score(&self, _game: &GameState, preview: &ActionPreview) -> f64 {
+        if self.supports_focus(preview.id) {
+            0.28
+        } else {
+            0.0
+        }
+    }
+
+    fn rationale(&self, _game: &GameState, preview: &ActionPreview) -> Option<&'static str> {
+        self.supports_focus(preview.id).then_some(match self.focus {
+            CampaignFocus::Livelihood => "符合民生與生活成本主軸",
+            CampaignFocus::OpenGovernment => "符合誠信與透明治理主軸",
+            CampaignFocus::DemocraticResilience => "符合民主韌性與公民參與主軸",
+        })
     }
 }
 
@@ -532,5 +601,24 @@ mod tests {
         assert!(recommendations
             .iter()
             .any(|recommendation| recommendation.rationales.contains(&"自訂事件模組")));
+    }
+
+    #[test]
+    fn campaign_focus_modifies_relevant_daily_action_ranking() {
+        let game = GameState::new_with_style(2024, Side::Challenger, 3, CampaignStyle::Balanced);
+        let base = StrategyEngine::new(StrategyProfile::Balanced)
+            .rank_actions(&game)
+            .into_iter()
+            .find(|entry| entry.preview.id == ActionId::CommunityTour)
+            .unwrap();
+        let focused = StrategyEngine::new(StrategyProfile::Balanced)
+            .with_campaign_focus(CampaignFocus::Livelihood)
+            .rank_actions(&game)
+            .into_iter()
+            .find(|entry| entry.preview.id == ActionId::CommunityTour)
+            .unwrap();
+
+        assert!((focused.score - base.score - 0.28).abs() < 0.000_001);
+        assert!(focused.rationales.contains(&"符合民生與生活成本主軸"));
     }
 }

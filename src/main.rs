@@ -6,8 +6,11 @@ use project_twn::history::{
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
     ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameError, GameState,
-    ModelParameters, SensitivityParameter, Side, StoryOutcome, TacticCategory, CAMPAIGN_ROUNDS,
-    DAYS_PER_WEEK,
+    ModelParameters, SensitivityParameter, Side, StafferOutcome, StoryOutcome, TacticCategory,
+    CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+};
+use project_twn::staffer::{
+    continuity_bonus as staffer_continuity_bonus, daily_scene as staffer_daily_scene,
 };
 use project_twn::story::coherence_bonus;
 use project_twn::strategy::{
@@ -19,7 +22,7 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
-const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline\tstory_path";
+const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline\tstory_path\tstaffer_path";
 const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition\tdifficulty\tevent_pack\ttimeline\tstory_path";
 const MAX_BATCH_RUNS: u32 = 10_000;
 const MAX_STRATEGY_SWEEP_RUNS: u32 = 1_000;
@@ -40,6 +43,7 @@ struct Options {
     party: Option<String>,
     setup: CampaignSetup,
     primary: bool,
+    staffer_mode: bool,
     log: Option<String>,
     batch: Option<u32>,
     sweep_styles: bool,
@@ -166,6 +170,11 @@ fn run() -> Result<(), String> {
     }
 
     if let Some(runs) = options.batch {
+        if options.staffer_mode {
+            return Err(
+                "幕僚模式目前是單場劇情體驗，尚未接入批次模擬；請移除 --batch。".to_string(),
+            );
+        }
         let role = options
             .role
             .ok_or_else(|| "批次模擬必須明確指定 --role，避免把互動預設混入結果。".to_string())?;
@@ -179,6 +188,9 @@ fn run() -> Result<(), String> {
         return run_batch(&options, runs, role, region, selected_party);
     }
 
+    if options.staffer_mode && options.primary {
+        return Err("幕僚模式由玩家扮演競選幕僚；目前不搭配 --primary 初選模式。".to_string());
+    }
     let role = match options.role {
         Some(role) => role,
         None if options.auto || options.party.is_some() => Side::Challenger,
@@ -198,16 +210,30 @@ fn run() -> Result<(), String> {
         selected_party,
     };
     let mut game = new_scenario_game(&scenario, options.seed, ModelParameters::default());
-    print_intro(&game, options.seed, options.strategy);
+    print_intro(&game, options.seed, options.strategy, options.staffer_mode);
 
     if options.auto {
-        run_auto(&mut game, true, options.strategy);
+        if options.staffer_mode {
+            run_auto_staffer(&mut game, true, options.strategy);
+        } else {
+            run_auto(&mut game, true, options.strategy);
+        }
     } else {
-        run_interactive(&mut game, options.strategy)?;
+        run_interactive(&mut game, options.strategy, options.staffer_mode)?;
     }
     let result = print_final(&mut game);
+    if options.staffer_mode {
+        print_staffer_summary(&game);
+    }
     if let Some(path) = options.log.as_deref() {
-        save_campaign_log(path, &game, &result, options.seed, options.strategy)?;
+        save_campaign_log(
+            path,
+            &game,
+            &result,
+            options.seed,
+            options.strategy,
+            options.staffer_mode,
+        )?;
         println!("本場紀錄已追加至：{path}");
     }
     Ok(())
@@ -297,6 +323,7 @@ fn parse_args() -> Result<Options, String> {
         party: None,
         setup: CampaignSetup::default(),
         primary: false,
+        staffer_mode: false,
         log: None,
         batch: None,
         sweep_styles: false,
@@ -316,6 +343,7 @@ fn parse_args() -> Result<Options, String> {
             "--parties" => options.list_parties = true,
             "--auto" | "--demo" => options.auto = true,
             "--primary" => options.primary = true,
+            "--staffer" => options.staffer_mode = true,
             "--region" => {
                 options.region = Some(
                     args.next()
@@ -518,7 +546,7 @@ fn ask_role() -> Result<Side, String> {
     }
 }
 
-fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
+fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_mode: bool) {
     println!("\n=== 臺灣選戰模擬器 | Project-TWN ===");
     println!(
         "情境年份：{}　陣營：{}　能力風格：{}　策略引擎：{}　隨機種子：{}",
@@ -535,6 +563,9 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile) {
         game.setup.timeline.label()
     );
     print_player_assignment(game);
+    if staffer_mode {
+        println!("遊戲模式：幕僚模式｜你是虛構競選團隊的幕僚，負責設定主軸、處理陳情與事件、協調地方網絡、檢視支持度並安排最後布局。每兩週一次幕僚會議，不占用每日行動，但會消耗部分競選資源；本模式以專屬情節取代一般模式支線，避免同時觸發重複陳情故事。\n");
+    }
     if let Some(region) = game.region {
         println!(
             "地方情境：{}；上屆首長政黨為 {}。",
@@ -660,8 +691,11 @@ fn print_poll_table(game: &GameState) {
     }
 }
 
-fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<(), String> {
-    let engine = StrategyEngine::new(strategy);
+fn run_interactive(
+    game: &mut GameState,
+    strategy: StrategyProfile,
+    staffer_mode: bool,
+) -> Result<(), String> {
     'campaign: while !game.is_finished() {
         println!(
             "\n--- 第 {} / {} 週・第 {} / {} 天｜{} ---",
@@ -694,6 +728,9 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
         if let Some(event) = game.current_event() {
             println!("議題焦點：{} — {}", event.title, event.description);
         }
+        if staffer_mode {
+            print_staffer_daily_scene(game);
+        }
         if let Some(objective) = game.current_objective() {
             let progress = game.current_objective_progress();
             let target = objective.target_actions;
@@ -704,14 +741,24 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
                 objective.title, bar, progress, target, objective.description
             );
         }
-        if let Some(beat) = game.current_story_beat() {
-            println!("\n【多週情境｜第 {} 週】{}", beat.week, beat.title);
-            println!("登場人物：{}", beat.character);
-            println!("{}", beat.scene);
-            println!("（人物與情境為虛構合成素材；選擇會改變遊戲資源與支持度，不耗用每日行動。）");
-            loop {
-                for (index, choice) in beat.choices.iter().enumerate() {
-                    println!(
+        if staffer_mode
+            && game.day == 0
+            && game.current_staffer_brief().is_some()
+            && !run_interactive_staffer_brief(game)?
+        {
+            break 'campaign;
+        }
+        if !staffer_mode {
+            if let Some(beat) = game.current_story_beat() {
+                println!("\n【多週情境｜第 {} 週】{}", beat.week, beat.title);
+                println!("登場人物：{}", beat.character);
+                println!("{}", beat.scene);
+                println!(
+                    "（人物與情境為虛構合成素材；選擇會改變遊戲資源與支持度，不耗用每日行動。）"
+                );
+                loop {
+                    for (index, choice) in beat.choices.iter().enumerate() {
+                        println!(
                         "  {}) {}｜預算 {}｜支持度 {:+.2}｜團隊信任 {:+.1}｜動員 {:+.1}｜體力 {:+.1}{}",
                         index + 1,
                         choice.label,
@@ -726,32 +773,33 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
                             ""
                         }
                     );
-                    println!("     {}", choice.description);
-                }
-                let Some(selection) = select_story_choice(beat.choices.len())? else {
-                    break 'campaign;
-                };
-                if selection == 0 {
-                    game.skip_story_beat().map_err(|error| error.to_string())?;
-                    println!("本段情境暫不處理；後續故事仍會依目前進度展開。\n");
-                    break;
-                }
-                match game.apply_story_choice(selection - 1) {
-                    Ok(outcome) => {
-                        print_story_outcome(game, &outcome);
+                        println!("     {}", choice.description);
+                    }
+                    let Some(selection) = select_story_choice(beat.choices.len())? else {
+                        break 'campaign;
+                    };
+                    if selection == 0 {
+                        game.skip_story_beat().map_err(|error| error.to_string())?;
+                        println!("本段情境暫不處理；後續故事仍會依目前進度展開。\n");
                         break;
                     }
-                    Err(error @ GameError::InsufficientBudget { .. }) => {
-                        println!("{error}\n請改選其他解法或暫不處理。\n");
-                    }
-                    Err(error) => {
-                        println!("{error}\n");
-                        break;
+                    match game.apply_story_choice(selection - 1) {
+                        Ok(outcome) => {
+                            print_story_outcome(game, &outcome);
+                            break;
+                        }
+                        Err(error @ GameError::InsufficientBudget { .. }) => {
+                            println!("{error}\n請改選其他解法或暫不處理。\n");
+                        }
+                        Err(error) => {
+                            println!("{error}\n");
+                            break;
+                        }
                     }
                 }
             }
         }
-        let recommendations = engine.rank_actions(game);
+        let recommendations = strategy_engine_for(game, strategy, staffer_mode).rank_actions(game);
         let selected = select_interactive_action(&recommendations)?;
         let Some(action_id) = selected else {
             break;
@@ -766,7 +814,7 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
 
 fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
     loop {
-        print!("選擇解法（1–{choice_count}，0 暫不處理，q 結束本場）：");
+        print!("選擇方案（1–{choice_count}，0 略過，q 結束本場）：");
         io::stdout().flush().map_err(|error| error.to_string())?;
         let mut input = String::new();
         io::stdin()
@@ -783,6 +831,167 @@ fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
         }
         println!("請輸入有效的選項、0 或 q。\n");
     }
+}
+
+fn run_interactive_staffer_brief(game: &mut GameState) -> Result<bool, String> {
+    let Some(brief) = game.current_staffer_brief() else {
+        return Ok(true);
+    };
+    println!("\n【幕僚會議｜第 {} 週】{}", brief.week, brief.title);
+    println!("登場人物：{}", brief.character);
+    println!("{}", brief.scene);
+    if let Some(event) = game.current_event() {
+        println!("背景事件：{} — {}", event.title, event.description);
+    } else {
+        println!("背景事件：本週未排入事件卡；依照戰役局勢處理本次議程。");
+    }
+    if brief.index == 4 {
+        print_staffer_poll_brief(game);
+    }
+    println!("方案可呼應本週事件或延續既定主軸，獲得小幅遊戲內加成；所有支持度都是情境模型值，不是實際民調。");
+    loop {
+        for (index, choice) in brief.choices.iter().enumerate() {
+            let event_fit = game
+                .current_event()
+                .is_some_and(|event| event.issue == choice.issue);
+            let theme_fit = game
+                .staffer_progress
+                .focus()
+                .is_some_and(|focus| choice.affinity == Some(focus));
+            let mut tags = Vec::new();
+            if event_fit {
+                tags.push("呼應本週事件");
+            }
+            if theme_fit {
+                tags.push("延續競選主軸");
+            }
+            let tag = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("｜{}", tags.join("、"))
+            };
+            println!(
+                "  {}) {}｜預算 {}｜支持度 {:+.2}｜團隊信任 {:+.1}｜動員 {:+.1}｜體力 {:+.1}{}{}",
+                index + 1,
+                choice.label,
+                choice.budget_cost,
+                choice.support_delta,
+                choice.trust_delta,
+                choice.mobilization_delta,
+                choice.stamina_delta,
+                tag,
+                if choice.budget_cost > game.budget {
+                    "（預算不足）"
+                } else {
+                    ""
+                }
+            );
+            println!("     {}", choice.description);
+        }
+        let Some(selection) = select_story_choice(brief.choices.len())? else {
+            return Ok(false);
+        };
+        if selection == 0 {
+            game.skip_staffer_brief()
+                .map_err(|error| error.to_string())?;
+            println!("本次幕僚會議暫不處理；戰役每日行動照常繼續。\n");
+            return Ok(true);
+        }
+        match game.apply_staffer_choice(selection - 1) {
+            Ok(outcome) => {
+                print_staffer_outcome(game, &outcome);
+                return Ok(true);
+            }
+            Err(error @ GameError::InsufficientBudget { .. }) => {
+                println!("{error}\n請改選其他方案或略過本次會議。\n");
+            }
+            Err(error) => {
+                println!("{error}\n");
+                return Ok(true);
+            }
+        }
+    }
+}
+
+fn print_staffer_poll_brief(game: &GameState) {
+    let player = &game.candidates[game.player_index];
+    let player_share = game.polls[game.player_index];
+    let rival = game
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != game.player_index)
+        .max_by(|(left_index, _), (right_index, _)| {
+            game.polls[*left_index].total_cmp(&game.polls[*right_index])
+        });
+    println!("候選人支持度檢視（遊戲模型值，非實際民調）：");
+    println!(
+        "  {}：{:.2}%（相對起始盤 {:+.2} 點）",
+        player.name,
+        player_share,
+        player_share - player.historical_share
+    );
+    if let Some((index, candidate)) = rival {
+        println!(
+            "  目前支持度最高的競爭者 {}：{:.2}%",
+            candidate.name, game.polls[index]
+        );
+    }
+}
+
+fn print_staffer_daily_scene(game: &GameState) {
+    let week = game.round + 1;
+    let day = game.day + 1;
+    if let Some((arc, scene)) = staffer_daily_scene(week, day) {
+        println!("\n【今日選戰｜第 {week} 週・第 {day} 天｜{arc}】{scene}");
+    }
+    if game.day == 0 {
+        let reminder = match game.side {
+            Side::Incumbent => "執政方幕僚備忘：清楚區分已完成、進行中與超出權責的承諾。",
+            Side::Challenger => "在野方幕僚備忘：每項監督或批評都要接上替代方案、時程與資源來源。",
+        };
+        println!("{reminder}");
+    }
+    if day == 1 || day == 7 {
+        if let Some(focus) = game.staffer_progress.focus() {
+            println!(
+                "幕僚主軸回扣：{}；若今天改變訊息，記得向團隊交代原因。",
+                focus.label()
+            );
+        }
+    }
+}
+
+fn print_staffer_outcome(game: &GameState, outcome: &StafferOutcome) {
+    let candidate_name = &game.candidates[game.player_index].name;
+    println!(
+        "✓ 幕僚決策｜{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
+        outcome.title,
+        candidate_name,
+        outcome.support_before,
+        outcome.support_after,
+        outcome.support_delta,
+        outcome.trust_after,
+        outcome.mobilization_after,
+        outcome.stamina_after,
+        outcome.budget_after
+    );
+    if let Some(note) = outcome.note {
+        println!("  {note}");
+    }
+}
+
+fn print_staffer_summary(game: &GameState) {
+    println!(
+        "幕僚模式回顧：完成／略過 {} 次幕僚會議；競選主軸：{}；決策路線：{}",
+        game.staffer_progress.completed_briefings(),
+        game.staffer_progress
+            .focus()
+            .map(|focus| focus.label())
+            .unwrap_or("未設定"),
+        game.staffer_progress.summary()
+    );
+    println!("{}", game.staffer_progress.ending_note());
 }
 
 fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
@@ -803,6 +1012,20 @@ fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
     if let Some(note) = outcome.note {
         println!("  {note}");
     }
+}
+
+fn strategy_engine_for(
+    game: &GameState,
+    strategy: StrategyProfile,
+    staffer_mode: bool,
+) -> StrategyEngine {
+    let engine = StrategyEngine::new(strategy);
+    if staffer_mode {
+        if let Some(focus) = game.staffer_progress.focus() {
+            return engine.with_campaign_focus(focus);
+        }
+    }
+    engine
 }
 
 fn select_interactive_action(
@@ -958,39 +1181,113 @@ fn run_auto(
     show_progress: bool,
     strategy: StrategyProfile,
 ) -> AutoRunSummary {
-    let engine = StrategyEngine::new(strategy);
+    run_auto_mode(game, show_progress, strategy, false)
+}
+
+fn run_auto_staffer(
+    game: &mut GameState,
+    show_progress: bool,
+    strategy: StrategyProfile,
+) -> AutoRunSummary {
+    run_auto_mode(game, show_progress, strategy, true)
+}
+
+fn run_auto_mode(
+    game: &mut GameState,
+    show_progress: bool,
+    strategy: StrategyProfile,
+    staffer_mode: bool,
+) -> AutoRunSummary {
     let mut summary = AutoRunSummary::default();
     while !game.is_finished() {
-        if let Some(beat) = game.current_story_beat() {
-            let selected = beat
-                .choices
-                .iter()
-                .enumerate()
-                .filter(|(_, choice)| choice.budget_cost <= game.budget)
-                .max_by(|(_, left), (_, right)| {
-                    let score = |choice: &project_twn::story::StoryChoiceSpec| {
-                        let bonus = coherence_bonus(beat.index, choice.id, game.story_progress);
-                        choice.support_delta * 3.0
-                            + (choice.trust_delta + bonus.trust_delta) * 0.08
-                            + choice.mobilization_delta * 0.05
-                            + choice.stamina_delta * 0.02
-                            - f64::from(choice.budget_cost) * 0.12
-                            + bonus.support_delta * 3.0
-                    };
-                    score(left).total_cmp(&score(right))
-                })
-                .map(|(index, _)| index);
-            if let Some(index) = selected {
-                if let Ok(outcome) = game.apply_story_choice(index) {
-                    if show_progress {
-                        print_story_outcome(game, &outcome);
+        if staffer_mode && show_progress {
+            print_staffer_daily_scene(game);
+        }
+        if staffer_mode {
+            if let Some(brief) = game.current_staffer_brief() {
+                if show_progress {
+                    println!("\n【幕僚會議｜第 {} 週】{}", brief.week, brief.title);
+                    println!("{}", brief.scene);
+                    if let Some(event) = game.current_event() {
+                        println!("背景事件：{} — {}", event.title, event.description);
                     }
                 }
-            } else {
-                let _ = game.skip_story_beat();
+                let selected = brief
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, choice)| choice.budget_cost <= game.budget)
+                    .max_by(|(_, left), (_, right)| {
+                        let score = |choice: &project_twn::staffer::StafferChoiceSpec| {
+                            let continuity = staffer_continuity_bonus(
+                                brief.index,
+                                choice,
+                                game.staffer_progress,
+                            );
+                            let event_match = game
+                                .current_event()
+                                .is_some_and(|event| event.issue == choice.issue);
+                            choice.support_delta * 3.0
+                                + (choice.trust_delta + continuity.trust_delta) * 0.08
+                                + choice.mobilization_delta * 0.05
+                                + choice.stamina_delta * 0.02
+                                - f64::from(choice.budget_cost) * 0.12
+                                + continuity.support_delta * 3.0
+                                + if event_match { 0.12 } else { 0.0 }
+                        };
+                        score(left).total_cmp(&score(right))
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = selected {
+                    if let Ok(outcome) = game.apply_staffer_choice(index) {
+                        if show_progress {
+                            print_staffer_outcome(game, &outcome);
+                        }
+                    }
+                } else {
+                    let _ = game.skip_staffer_brief();
+                    if show_progress {
+                        println!("本次幕僚會議因預算不足而略過。\n");
+                    }
+                }
             }
         }
-        let Some(recommendation) = engine.rank_actions(game).into_iter().next() else {
+        if !staffer_mode {
+            if let Some(beat) = game.current_story_beat() {
+                let selected = beat
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, choice)| choice.budget_cost <= game.budget)
+                    .max_by(|(_, left), (_, right)| {
+                        let score = |choice: &project_twn::story::StoryChoiceSpec| {
+                            let bonus = coherence_bonus(beat.index, choice.id, game.story_progress);
+                            choice.support_delta * 3.0
+                                + (choice.trust_delta + bonus.trust_delta) * 0.08
+                                + choice.mobilization_delta * 0.05
+                                + choice.stamina_delta * 0.02
+                                - f64::from(choice.budget_cost) * 0.12
+                                + bonus.support_delta * 3.0
+                        };
+                        score(left).total_cmp(&score(right))
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = selected {
+                    if let Ok(outcome) = game.apply_story_choice(index) {
+                        if show_progress {
+                            print_story_outcome(game, &outcome);
+                        }
+                    }
+                } else {
+                    let _ = game.skip_story_beat();
+                }
+            }
+        }
+        let Some(recommendation) = strategy_engine_for(game, strategy, staffer_mode)
+            .rank_actions(game)
+            .into_iter()
+            .next()
+        else {
             break;
         };
         let Ok(outcome) = game.apply_action(recommendation.preview.id) else {
@@ -1914,6 +2211,7 @@ fn save_campaign_log(
     result: &ElectionOutcome,
     seed: u64,
     strategy: StrategyProfile,
+    staffer_mode: bool,
 ) -> Result<(), String> {
     let log_path = Path::new(path);
     let exists = log_path.exists();
@@ -1946,7 +2244,7 @@ fn save_campaign_log(
     let review = game.scorecard();
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         game.campaign_year,
         if game.region.is_some() {
             "local"
@@ -1975,7 +2273,16 @@ fn save_campaign_log(
         game.setup.difficulty.key(),
         game.setup.event_pack.key(),
         game.setup.timeline.key(),
-        game.story_progress.summary()
+        if staffer_mode {
+            "-".to_string()
+        } else {
+            game.story_progress.summary()
+        },
+        if staffer_mode {
+            game.staffer_progress.summary()
+        } else {
+            "-".to_string()
+        }
     )
     .map_err(|error| error.to_string())?;
     file.flush().map_err(|error| error.to_string())?;
@@ -2027,7 +2334,7 @@ fn print_usage() {
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable|hardball]
       [--difficulty story|standard|hard] [--event-pack all|democracy|cross-strait|local|media] [--timeline weekly|date]
-      [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
+      [--primary | --staffer] [--seed 整數] [--auto] [--log 檔案.tsv]
   project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--strategy 策略]
       [--sweep-styles | --sweep-strategies | --sensitivity | --interaction-sensitivity]
       [--year 年份] [--region 縣市] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
@@ -2035,6 +2342,7 @@ fn print_usage() {
 範例：
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
   cargo run -- --simulate 2024 --role challenger --difficulty story --event-pack democracy --timeline date
+  cargo run -- --year 2024 --role challenger --staffer --seed 42
   cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --strategy issue --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sweep-strategies --batch-log strategy.tsv
@@ -2043,6 +2351,7 @@ fn print_usage() {
 
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
+--staffer 開啟幕僚模式：設定競選主軸，並在六個關鍵週處理陳情、地方協調、事件回應、支持度檢視與最後布局；幕僚決策不占每日行動，但會消耗預算及影響遊戲資源。此單場模式目前不支援 --batch 或 --primary。
 難度可選故事／標準／挑戰；事件包可篩選民主化、兩岸、地方民生或媒體信任議題；--timeline date 會將有日期錨點的事件周年映射到 12 週戰役日曆，沒有錨點的週次留白。這是可切換的遊戲排程，不表示史實在遊戲年份重演。
 省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。
@@ -2130,5 +2439,22 @@ mod tests {
         assert_eq!(left.polls, right.polls);
         assert_eq!(left.finish(), right.finish());
         assert_eq!(left.objectives_completed(), right.objectives_completed());
+    }
+
+    #[test]
+    fn staffer_autopilot_replays_all_briefings_for_a_fixed_seed() {
+        let mut left = GameState::new(2024, Side::Challenger, 909);
+        let mut right = GameState::new(2024, Side::Challenger, 909);
+        let left_summary = run_auto_staffer(&mut left, false, StrategyProfile::Balanced);
+        let right_summary = run_auto_staffer(&mut right, false, StrategyProfile::Balanced);
+        assert_eq!(
+            left_summary.action_usage_counts,
+            right_summary.action_usage_counts
+        );
+        assert_eq!(left.polls, right.polls);
+        assert_eq!(left.staffer_progress, right.staffer_progress);
+        assert_eq!(left.staffer_progress.completed_briefings(), 6);
+        assert_eq!(left.round, CAMPAIGN_ROUNDS);
+        assert!(left.validate().is_ok());
     }
 }
