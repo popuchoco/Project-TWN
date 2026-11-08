@@ -493,7 +493,7 @@ mod tests {
         );
         assert!(daily_route_echo(11, 1, progress)
             .unwrap()
-            .contains("共同參與"));
+            .contains("居民代表"));
         assert!(ending_note(progress).contains("共同復勘"));
         assert!(daily_route_echo(11, 2, progress).is_none());
     }
