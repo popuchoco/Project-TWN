@@ -491,12 +491,12 @@ fn print_final(game: &mut GameState) -> ElectionOutcome {
         result.player_win_probability * 100.0
     );
     println!("這是遊戲隨機模型的結果，不是民調預測或真實選舉結果。\n");
-    println!("=== 戰役檢討雷達（0–100）===");
-    for (axis, score) in game.review().axes() {
+    println!("=== 戰役操作評分（0–100；非遊戲品質評測）===");
+    for (axis, score) in game.scorecard().axes() {
         let bars = "█".repeat((score / 5.0).round() as usize);
         println!("  {axis:<8} {score:>5.1} {bars}");
     }
-    let review = game.review();
+    let review = game.scorecard();
     let balanced = review.axes().iter().all(|(_, score)| *score >= 65.0);
     println!(
         "稱號：{}",
@@ -633,7 +633,7 @@ fn save_campaign_log(
             .map_err(|error| error.to_string())?;
     }
     let winner = &game.candidates[result.winner_index];
-    let review = game.review();
+    let review = game.scorecard();
     writeln!(
         file,
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
@@ -699,5 +699,5 @@ fn print_history() {
 }
 
 fn print_usage() {
-    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --parties\n  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n  cargo run -- --parties\n\n年份範圍：1996–2026。地方模式可用 --regions 查看22縣市；--parties 查看歷史政黨模板。競選為12週、每週7天，共84次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可把每場結果與雷達分數附加到 TSV，便於保存長期戰績。");
+    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --parties\n  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n  cargo run -- --parties\n\n年份範圍：1996–2026。地方模式可用 --regions 查看22縣市；--parties 查看歷史政黨模板。競選為12週、每週7天，共84次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可把每場結果與戰役操作評分附加到 TSV，便於保存長期戰績。");
 }

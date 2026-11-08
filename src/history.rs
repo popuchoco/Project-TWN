@@ -712,6 +712,13 @@ pub const EVENTS: &[EventCard] = &[
         active_campaign_years: &[1996, 2000],
     },
     EventCard {
+        year: 1993,
+        title: "拉法葉艦採購與佣金疑雲",
+        description: "臺灣於1991年簽約採購六艘拉法葉艦，後續圍繞佣金疑雲、海軍官兵命案、軍購監督與追討款項發展出長期調查及司法程序。此卡呈現採購透明與制度責任議題，不預判未經法院確定的個別指控。",
+        issue: Issue::Governance,
+        active_campaign_years: &[1996, 2000, 2004, 2008, 2012, 2016],
+    },
+    EventCard {
         year: 1992,
         title: "刑法第100條修正與言論自由",
         description: "1992年修正刑法第100條，普通內亂罪增列以強暴或脅迫為要件，單純政治言論不再因此成立該罪；「100行動聯盟」推動廢除政治刑法的社會運動背景亦值得理解。",
@@ -803,6 +810,13 @@ pub const EVENTS: &[EventCard] = &[
         active_campaign_years: &[2016, 2020],
     },
     EventCard {
+        year: 2012,
+        title: "林益世收賄案與政治責任爭議",
+        description: "2012年林益世案曝光後進入長期司法程序。案件不同部分的認定與結果並不相同：財產來源不明罪已判刑確定，索賄及洗錢部分無罪確定，收受約6300萬元部分曾多次發回更審；此卡聚焦廉政、權力關說與司法程序，不把各部分混作單一結果。",
+        issue: Issue::Trust,
+        active_campaign_years: &[2016, 2020, 2024, 2026],
+    },
+    EventCard {
         year: 2013,
         title: "洪仲丘事件與軍中人權改革",
         description: "義務役士兵洪仲丘死亡引發白衫軍等公民抗議，推動軍事審判制度改革與軍中人權、責任追究議題。",
@@ -832,6 +846,20 @@ pub const EVENTS: &[EventCard] = &[
     },
     EventCard {
         year: 2016,
+        title: "周子瑜遭貼台獨標籤與道歉影片爭議",
+        description: "總統投票前夕，藝人黃安在社群平台指稱周子瑜為台獨，周子瑜其後發布道歉影片並暫停中國大陸活動，引發政治標籤、跨境市場壓力、未成年人處境及言論自主的討論。此事件與愛國同心會相關議題分開呈現；研究可討論其選舉傳播背景，但沒有足夠證據將固定票數效果歸因於單一事件。",
+        issue: Issue::CrossStrait,
+        active_campaign_years: &[2016, 2020, 2024, 2026],
+    },
+    EventCard {
+        year: 2016,
+        title: "愛國同心會與香港人士討論港獨衝突",
+        description: "2016年臺北一處飯店發生愛國同心會人士因鄰座香港人士談論港獨而上前嗆聲、演變成肢體衝突的事件，警方表示將相關人士依法處理。此卡聚焦異議表達、政治標籤與公共安全；與黃安對周子瑜的社群發文及其後的選舉傳播分開記錄。",
+        issue: Issue::Civic,
+        active_campaign_years: &[2020, 2024, 2026],
+    },
+    EventCard {
+        year: 2016,
         title: "民進黨首次完全執政的施政責任",
         description: "民進黨首次同時取得總統職位與立法院多數；政策推動、改革速度、利益分配與監督成為支持者和反對者檢視焦點。",
         issue: Issue::Governance,
@@ -857,6 +885,20 @@ pub const EVENTS: &[EventCard] = &[
         description: "2018年地方選舉中，韓國瑜在高雄勝選並帶動全國政治討論。研究將其傳播、訴求與支持擴張列為觀察面向；本作不把它設定成任何政黨的固定加成。",
         issue: Issue::Economy,
         active_campaign_years: &[2020, 2024],
+    },
+    EventCard {
+        year: 2018,
+        title: "李新死因影片爭議與羅淑蕾名譽訴訟",
+        description: "前臺北市議員李新去世後，相關影片提出涉及羅淑蕾等人的指控；羅淑蕾聲請移除影片的假處分遭法院駁回。該程序裁定不是對影片指控真偽的判決；本卡呈現政治人物名譽、媒體傳播與司法救濟的爭論。",
+        issue: Issue::Media,
+        active_campaign_years: &[2020, 2024, 2026],
+    },
+    EventCard {
+        year: 2018,
+        title: "愛國同心會成員參選與賄選判決",
+        description: "愛國同心會成員張秀葉參選2018年臺北市議員選舉，涉向選民提供餐飲。最高法院於2022年駁回上訴、判刑3年5月定讞。此為特定候選人及個案的司法結果，與黃安對周子瑜的社群發文不是同一事件，也不據此推論所有組織成員或政治檢舉皆違法。",
+        issue: Issue::Trust,
+        active_campaign_years: &[2022, 2024, 2026],
     },
     EventCard {
         year: 2019,
@@ -894,6 +936,13 @@ pub const EVENTS: &[EventCard] = &[
         active_campaign_years: &[2024, 2026],
     },
     EventCard {
+        year: 2021,
+        title: "彭文正遭通緝與言論／司法程序爭議",
+        description: "彭文正因涉加重誹謗蔡英文學歷而遭起訴，未到庭後臺北地方法院於2021年發布通緝。此卡記錄該刑事案件的程序狀態，不把通緝視為有罪判決；其另行提出、涉及蔡英文論文的自訴案件於2026年最高法院駁回確定，屬不同案件及程序。",
+        issue: Issue::Rights,
+        active_campaign_years: &[2024, 2026],
+    },
+    EventCard {
         year: 2022,
         title: "地方選舉的執政評價",
         description: "地方選舉結果提醒參選者：地方服務、候選人特質及中央執政評價可能彼此不同，勿將地方票直接等同全國民意。",
@@ -905,6 +954,13 @@ pub const EVENTS: &[EventCard] = &[
         title: "香港基本法第23條立法",
         description: "香港《維護國家安全條例》於2024年3月生效；台灣公共討論涉及國安治理、自治、人權及國際信任。",
         issue: Issue::Rights,
+        active_campaign_years: &[2026],
+    },
+    EventCard {
+        year: 2024,
+        title: "柯文哲京華城與政治獻金案件訴訟",
+        description: "柯文哲涉京華城及政治獻金等案於2024年遭起訴；臺北地方法院2026年3月一審判決後，柯文哲提起上訴，高等法院於2026年9月開始審理政治獻金部分。截至2026年11月8日尚未終局確定，故分清起訴、一審與上訴程序，不以未確定判決預設政治或選舉效果。",
+        issue: Issue::Trust,
         active_campaign_years: &[2026],
     },
     EventCard {
@@ -1095,6 +1151,35 @@ mod tests {
         assert!(!events_for_campaign(2020)
             .iter()
             .any(|event| event.year == 2020));
+    }
+
+    #[test]
+    fn political_event_cards_keep_distinct_legal_and_historical_contexts() {
+        let titles: Vec<_> = EVENTS.iter().map(|event| event.title).collect();
+        for expected in [
+            "拉法葉艦採購與佣金疑雲",
+            "林益世收賄案與政治責任爭議",
+            "周子瑜遭貼台獨標籤與道歉影片爭議",
+            "愛國同心會與香港人士討論港獨衝突",
+            "李新死因影片爭議與羅淑蕾名譽訴訟",
+            "愛國同心會成員參選與賄選判決",
+            "彭文正遭通緝與言論／司法程序爭議",
+            "柯文哲京華城與政治獻金案件訴訟",
+        ] {
+            assert!(titles.contains(&expected), "missing event card: {expected}");
+        }
+
+        let chou = EVENTS
+            .iter()
+            .find(|event| event.title.contains("周子瑜"))
+            .unwrap();
+        let patriot_association = EVENTS
+            .iter()
+            .find(|event| event.title.contains("愛國同心會"))
+            .unwrap();
+        assert_ne!(chou.title, patriot_association.title);
+        assert!(chou.description.contains("與愛國同心會相關議題分開呈現"));
+        assert!(patriot_association.description.contains("特定候選人及個案"));
     }
 
     #[test]

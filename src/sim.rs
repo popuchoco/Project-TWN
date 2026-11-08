@@ -3,6 +3,7 @@ use crate::history::{
     party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
     VOTER_SEGMENTS,
 };
+use std::fmt;
 
 pub const CAMPAIGN_ROUNDS: u8 = 12;
 pub const DAYS_PER_WEEK: u8 = 7;
@@ -14,6 +15,57 @@ const WEEKLY_FUNDING: i32 = 8;
 pub enum Side {
     Incumbent,
     Challenger,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GameError {
+    CampaignComplete,
+    AlreadySettled,
+    ActionUnavailable,
+    InsufficientBudget { required: i32, available: i32 },
+    RequiresThreeCandidates,
+    PollAlreadyTaken,
+    CoalitionAlreadyUsed,
+}
+
+impl fmt::Display for GameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CampaignComplete => formatter.write_str("競選期已結束。"),
+            Self::AlreadySettled => formatter.write_str("本場競選已結算。"),
+            Self::ActionUnavailable => formatter.write_str("這項行動不適用於目前陣營。"),
+            Self::InsufficientBudget {
+                required,
+                available,
+            } => write!(formatter, "預算不足（需要 {required}，剩餘 {available}）。"),
+            Self::RequiresThreeCandidates => {
+                formatter.write_str("至少三位候選人時才可進行多候選人民調協調。")
+            }
+            Self::PollAlreadyTaken => formatter.write_str("本週已完成民調協調；每週最多一次。"),
+            Self::CoalitionAlreadyUsed => formatter.write_str("本週已進行跨黨協商；每週最多一次。"),
+        }
+    }
+}
+
+impl std::error::Error for GameError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CampaignPhase {
+    Foundation,
+    IssueCompetition,
+    GetOutTheVote,
+    Complete,
+}
+
+impl CampaignPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Foundation => "布局期",
+            Self::IssueCompetition => "議題攻防期",
+            Self::GetOutTheVote => "決戰期",
+            Self::Complete => "競選期已結束",
+        }
+    }
 }
 
 impl Side {
@@ -342,10 +394,14 @@ pub struct GameState {
     pub round: u8,
     pub day: u8,
     pub events: Vec<&'static EventCard>,
+    /// One seeded issue focus per campaign week. `events` remains the full
+    /// eligible event pool displayed to the player.
+    event_schedule: Vec<&'static EventCard>,
     action_uses: [u8; 12],
     matched_events: u8,
     pub poll_taken_this_week: bool,
     pub coalition_this_week: bool,
+    final_outcome: Option<ElectionOutcome>,
     rng: Rng,
 }
 
@@ -374,7 +430,7 @@ pub struct VoterSegmentPoll {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct CampaignReview {
+pub struct CampaignScorecard {
     pub policy: f64,
     pub trust: f64,
     pub mobilization: f64,
@@ -383,7 +439,7 @@ pub struct CampaignReview {
     pub versatility: f64,
 }
 
-impl CampaignReview {
+impl CampaignScorecard {
     pub fn axes(self) -> [(&'static str, f64); 6] {
         [
             ("政策準備", self.policy),
@@ -396,7 +452,7 @@ impl CampaignReview {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ElectionOutcome {
     pub shares: Vec<f64>,
     pub winner_index: usize,
@@ -525,6 +581,9 @@ impl GameState {
             Side::Challenger => (50.0, 50.0),
         };
         let voter_segments = make_voter_segments(&polls);
+        let events = events_for_campaign(campaign_year);
+        let mut rng = Rng::new(seed);
+        let event_schedule = make_event_schedule(&events, &mut rng);
 
         Self {
             campaign_year,
@@ -543,47 +602,49 @@ impl GameState {
             stamina: 100.0,
             round: 0,
             day: 0,
-            events: events_for_campaign(campaign_year),
+            events,
+            event_schedule,
             action_uses: [0; 12],
             matched_events: 0,
             poll_taken_this_week: false,
             coalition_this_week: false,
-            rng: Rng::new(seed),
+            final_outcome: None,
+            rng,
         }
     }
 
     pub fn current_event(&self) -> Option<&'static EventCard> {
-        if self.events.is_empty() {
-            return None;
-        }
-        Some(self.events[(self.round as usize) % self.events.len()])
+        self.event_schedule.get(self.round as usize).copied()
     }
 
-    pub fn apply_action(&mut self, id: ActionId) -> Result<ActionOutcome, String> {
+    pub fn apply_action(&mut self, id: ActionId) -> Result<ActionOutcome, GameError> {
+        if self.final_outcome.is_some() {
+            return Err(GameError::AlreadySettled);
+        }
         if self.round >= CAMPAIGN_ROUNDS {
-            return Err("競選期已結束。".to_string());
+            return Err(GameError::CampaignComplete);
         }
         let action = actions_for(self.side)
             .iter()
             .find(|action| action.id == id)
-            .ok_or_else(|| "這項行動不適用於目前陣營。".to_string())?;
+            .ok_or(GameError::ActionUnavailable)?;
         if self.budget < action.cost {
-            return Err(format!(
-                "預算不足（需要 {}，剩餘 {}）。",
-                action.cost, self.budget
-            ));
+            return Err(GameError::InsufficientBudget {
+                required: action.cost,
+                available: self.budget,
+            });
         }
         if id == ActionId::PollCoordination && self.candidates.len() < 3 {
-            return Err("至少三位候選人時才有整合協商議題。".to_string());
+            return Err(GameError::RequiresThreeCandidates);
         }
         if id == ActionId::PollCoordination && self.poll_taken_this_week {
-            return Err("本週已完成民調協調；每週最多一次。".to_string());
+            return Err(GameError::PollAlreadyTaken);
         }
         if id == ActionId::CoalitionTalks && self.candidates.len() < 3 {
-            return Err("至少三位候選人時才有第三勢力協商議題。".to_string());
+            return Err(GameError::RequiresThreeCandidates);
         }
         if id == ActionId::CoalitionTalks && self.coalition_this_week {
-            return Err("本週已進行跨黨協商；每週最多一次。".to_string());
+            return Err(GameError::CoalitionAlreadyUsed);
         }
 
         let share_before = self.polls[self.player_index];
@@ -738,14 +799,22 @@ impl GameState {
     }
 
     pub fn phase_label(&self) -> &'static str {
-        match self.round / 4 {
-            0 => "布局期",
-            1 => "議題攻防期",
-            _ => "決戰期",
+        self.phase().label()
+    }
+
+    pub fn phase(&self) -> CampaignPhase {
+        if self.is_finished() || self.is_settled() {
+            CampaignPhase::Complete
+        } else {
+            match self.round / 4 {
+                0 => CampaignPhase::Foundation,
+                1 => CampaignPhase::IssueCompetition,
+                _ => CampaignPhase::GetOutTheVote,
+            }
         }
     }
 
-    pub fn review(&self) -> CampaignReview {
+    pub fn scorecard(&self) -> CampaignScorecard {
         let policy_actions = [
             ActionId::PolicyDelivery,
             ActionId::CrisisResponse,
@@ -761,7 +830,7 @@ impl GameState {
         } else {
             0.0
         };
-        CampaignReview {
+        CampaignScorecard {
             policy: (25.0 + policy_ratio * 500.0).clamp(0.0, 100.0),
             trust: self.trust,
             mobilization: self.turnout_momentum,
@@ -773,6 +842,9 @@ impl GameState {
     }
 
     pub fn finish(&mut self) -> ElectionOutcome {
+        if let Some(outcome) = &self.final_outcome {
+            return outcome.clone();
+        }
         let mut player_wins = 0_usize;
         let mut final_shares = self.polls.clone();
         let samples = 1_200;
@@ -791,15 +863,95 @@ impl GameState {
             }
         }
 
-        ElectionOutcome {
+        let outcome = ElectionOutcome {
             winner_index: winner_index(&final_shares),
             shares: final_shares,
             player_win_probability: player_wins as f64 / samples as f64,
-        }
+        };
+        self.final_outcome = Some(outcome.clone());
+        outcome
     }
 
     pub fn is_finished(&self) -> bool {
         self.round >= CAMPAIGN_ROUNDS
+    }
+
+    pub fn is_settled(&self) -> bool {
+        self.final_outcome.is_some()
+    }
+
+    /// Check the public state invariants at a test or future persistence boundary.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.candidates.len() < 2 || self.polls.len() != self.candidates.len() {
+            return Err(
+                "candidate and poll dimensions must match and contain at least two entries",
+            );
+        }
+        if !is_valid_share_vector(&self.polls) {
+            return Err("aggregate poll shares must be finite, within 0..=100, and sum to 100");
+        }
+        if self.voter_segments.is_empty() {
+            return Err("at least one voter segment is required");
+        }
+        let segment_weight: f64 = self
+            .voter_segments
+            .iter()
+            .map(|segment| segment.weight_pct)
+            .sum();
+        if !segment_weight.is_finite() || (segment_weight - 100.0).abs() > 0.0001 {
+            return Err("voter segment weights must sum to 100");
+        }
+        for segment in &self.voter_segments {
+            if !is_valid_share_vector(&segment.polls)
+                || segment.polls.len() != self.candidates.len()
+            {
+                return Err("each voter segment must have a valid poll vector per candidate");
+            }
+        }
+        for (index, aggregate) in self.polls.iter().enumerate() {
+            let from_segments: f64 = self
+                .voter_segments
+                .iter()
+                .map(|segment| segment.polls[index] * segment.weight_pct / 100.0)
+                .sum();
+            if (aggregate - from_segments).abs() > 0.0001 {
+                return Err("aggregate polls must equal the weighted voter segment polls");
+            }
+        }
+        if !(0..=MAX_BUDGET).contains(&self.budget) {
+            return Err("budget must remain within the configured bounds");
+        }
+        if ![self.trust, self.turnout_momentum, self.stamina]
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        {
+            return Err("trust, turnout, and stamina must remain within 0..=100");
+        }
+        if self.round > CAMPAIGN_ROUNDS || self.day >= DAYS_PER_WEEK {
+            return Err("campaign clock is outside the configured schedule");
+        }
+        if self.round == CAMPAIGN_ROUNDS && self.day != 0 {
+            return Err("a completed campaign must be at the first day boundary");
+        }
+        if !self.events.is_empty() && self.event_schedule.len() != CAMPAIGN_ROUNDS as usize {
+            return Err("an eligible event pool must produce one scheduled focus per week");
+        }
+        if self.events.is_empty() && !self.event_schedule.is_empty() {
+            return Err("event schedule must be empty when no events are eligible");
+        }
+        if let Some(outcome) = &self.final_outcome {
+            if outcome.winner_index >= self.candidates.len()
+                || !is_valid_share_vector(&outcome.shares)
+                || outcome.shares.len() != self.candidates.len()
+                || !outcome.player_win_probability.is_finite()
+                || !(0.0..=1.0).contains(&outcome.player_win_probability)
+            {
+                return Err(
+                    "settled outcome must contain a valid winner, shares, and win probability",
+                );
+            }
+        }
+        Ok(())
     }
 
     fn strongest_rival(&self) -> Option<usize> {
@@ -894,6 +1046,36 @@ impl GameState {
     }
 }
 
+fn make_event_schedule(events: &[&'static EventCard], rng: &mut Rng) -> Vec<&'static EventCard> {
+    if events.is_empty() {
+        return Vec::new();
+    }
+
+    let mut schedule = Vec::with_capacity(CAMPAIGN_ROUNDS as usize);
+    let mut deck = Vec::new();
+    while schedule.len() < CAMPAIGN_ROUNDS as usize {
+        if deck.is_empty() {
+            deck.extend_from_slice(events);
+            for index in (1..deck.len()).rev() {
+                let other = (rng.next_u64() % (index as u64 + 1)) as usize;
+                deck.swap(index, other);
+            }
+            if deck.len() > 1
+                && schedule
+                    .last()
+                    .is_some_and(|previous: &&'static EventCard| {
+                        previous.title == deck.last().unwrap().title
+                    })
+            {
+                let last = deck.len() - 1;
+                deck.swap(last, last - 1);
+            }
+        }
+        schedule.push(deck.pop().expect("event deck is refilled before use"));
+    }
+    schedule
+}
+
 fn winner_index(shares: &[f64]) -> usize {
     shares
         .iter()
@@ -901,6 +1083,14 @@ fn winner_index(shares: &[f64]) -> usize {
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(index, _)| index)
         .unwrap_or(0)
+}
+
+fn is_valid_share_vector(shares: &[f64]) -> bool {
+    shares.len() >= 2
+        && shares
+            .iter()
+            .all(|share| share.is_finite() && (0.0..=100.0).contains(share))
+        && (shares.iter().sum::<f64>() - 100.0).abs() < 0.0001
 }
 
 fn action_index(id: ActionId) -> usize {
@@ -1015,6 +1205,7 @@ mod tests {
         let mut game = GameState::new(2024, Side::Incumbent, 123);
         let before = game.budget;
         let outcome = game.apply_action(ActionId::PolicyDelivery).unwrap();
+        assert!(game.validate().is_ok());
         assert_eq!(game.budget, before - 3);
         assert_eq!(outcome.week, 1);
         assert_eq!(outcome.day, 1);
@@ -1027,6 +1218,7 @@ mod tests {
         assert_eq!(game.budget, before - 3 + WEEKLY_FUNDING);
         assert!(game.polls.iter().all(|share| *share >= 0.0));
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
+        assert!(game.validate().is_ok());
     }
 
     #[test]
@@ -1051,6 +1243,63 @@ mod tests {
         }
         assert_eq!(left.polls, right.polls);
         assert_eq!(left.finish().shares, right.finish().shares);
+    }
+
+    #[test]
+    fn weekly_event_schedule_is_seeded_and_avoids_adjacent_repeats() {
+        let left = GameState::new(2024, Side::Challenger, 4242);
+        let right = GameState::new(2024, Side::Challenger, 4242);
+        let left_titles: Vec<_> = left
+            .event_schedule
+            .iter()
+            .map(|event| event.title)
+            .collect();
+        let right_titles: Vec<_> = right
+            .event_schedule
+            .iter()
+            .map(|event| event.title)
+            .collect();
+
+        assert_eq!(left_titles, right_titles);
+        assert_eq!(left.event_schedule.len(), CAMPAIGN_ROUNDS as usize);
+        assert!(left_titles.windows(2).all(|pair| pair[0] != pair[1]));
+        assert!(left.event_schedule.iter().all(|event| left
+            .events
+            .iter()
+            .any(|eligible| eligible.title == event.title)));
+        assert!(left.validate().is_ok());
+    }
+
+    #[test]
+    fn campaign_phase_tracks_four_week_arcs_and_completion() {
+        let mut game = GameState::new(2024, Side::Challenger, 3);
+        assert_eq!(game.phase(), CampaignPhase::Foundation);
+        for _ in 0..4 * DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        assert_eq!(game.phase(), CampaignPhase::IssueCompetition);
+        for _ in 0..4 * DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        assert_eq!(game.phase(), CampaignPhase::GetOutTheVote);
+        for _ in 0..4 * DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        assert_eq!(game.phase(), CampaignPhase::Complete);
+    }
+
+    #[test]
+    fn settlement_is_idempotent_and_closes_the_engine_to_more_actions() {
+        let mut game = GameState::new(2024, Side::Challenger, 314);
+        let first = game.finish();
+        let second = game.finish();
+        assert_eq!(first, second);
+        assert!(game.is_settled());
+        assert!(game.validate().is_ok());
+        assert!(matches!(
+            game.apply_action(ActionId::CommunityTour),
+            Err(GameError::AlreadySettled)
+        ));
     }
 
     #[test]
