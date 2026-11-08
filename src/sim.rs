@@ -1,9 +1,11 @@
 use crate::history::{
     baseline_election, challenger_candidate_index, events_for_campaign, incumbent_candidate_index,
-    EventCard, Issue, PresidentialElection, RegionProfile,
+    party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
+    VOTER_SEGMENTS,
 };
 
 pub const CAMPAIGN_ROUNDS: u8 = 12;
+pub const DAYS_PER_WEEK: u8 = 7;
 const DEFAULT_SEED: u64 = 0x0054_574E_5F53_494D;
 const MAX_BUDGET: i32 = 120;
 const WEEKLY_FUNDING: i32 = 8;
@@ -109,48 +111,60 @@ const INCUMBENT_ACTIONS: &[ActionSpec] = &[
         id: ActionId::PolicyDelivery,
         name: "施政方案落地",
         description: "以可量化的政策進度與公共服務表現爭取支持。",
-        cost: 20,
-        base_swing: 1.75,
-        trust_delta: 0.8,
-        turnout_delta: 0.4,
+        cost: 3,
+        base_swing: 0.38,
+        trust_delta: 0.18,
+        turnout_delta: 0.08,
         issues: &[Issue::Economy, Issue::Governance, Issue::Local],
-        stamina_cost: 10.0,
+        stamina_cost: 1.6,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::CrisisResponse,
         name: "公共危機應變",
         description: "提出防災、衛生或民生危機應變計畫；成效與透明度影響信任。",
-        cost: 18,
-        base_swing: 1.75,
-        trust_delta: 1.8,
-        turnout_delta: 0.5,
+        cost: 3,
+        base_swing: 0.36,
+        trust_delta: 0.28,
+        turnout_delta: 0.10,
         issues: &[Issue::PublicHealth, Issue::Governance],
-        stamina_cost: 12.0,
+        stamina_cost: 1.8,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::TransparencyReport,
         name: "公開施政與檢討",
         description: "公開進度、預算及尚未完成事項，降低資訊落差。",
-        cost: 10,
-        base_swing: 1.2,
-        trust_delta: 2.4,
-        turnout_delta: 0.4,
+        cost: 1,
+        base_swing: 0.24,
+        trust_delta: 0.30,
+        turnout_delta: 0.08,
         issues: &[Issue::Trust, Issue::Media, Issue::Governance],
-        stamina_cost: 5.0,
+        stamina_cost: 0.7,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::PublicServices,
         name: "地方民生服務",
         description: "強化公共運輸、照護、教育或社區服務交付。",
-        cost: 14,
-        base_swing: 1.45,
-        trust_delta: 0.9,
-        turnout_delta: 1.0,
+        cost: 2,
+        base_swing: 0.31,
+        trust_delta: 0.19,
+        turnout_delta: 0.19,
         issues: &[Issue::Local, Issue::Education, Issue::Rights],
-        stamina_cost: 9.0,
+        stamina_cost: 1.2,
+        stamina_recovery: 0.0,
+    },
+    ActionSpec {
+        id: ActionId::CoalitionTalks,
+        name: "第三勢力協商與政見交換",
+        description: "依政黨議題接近度尋找協作對象；談成時可整合部分支持。",
+        cost: 2,
+        base_swing: 0.12,
+        trust_delta: 0.20,
+        turnout_delta: 0.12,
+        issues: &[Issue::Civic, Issue::Governance, Issue::CrossStrait],
+        stamina_cost: 0.8,
         stamina_recovery: 0.0,
     },
     ActionSpec {
@@ -158,11 +172,11 @@ const INCUMBENT_ACTIONS: &[ActionSpec] = &[
         name: "公開政策問答",
         description: "以低成本發布可核實的政策說明與問答。",
         cost: 0,
-        base_swing: 0.45,
-        trust_delta: 0.2,
-        turnout_delta: 0.25,
+        base_swing: 0.10,
+        trust_delta: 0.08,
+        turnout_delta: 0.06,
         issues: &[Issue::Trust, Issue::Media],
-        stamina_cost: 2.0,
+        stamina_cost: 0.3,
         stamina_recovery: 0.0,
     },
     ActionSpec {
@@ -170,23 +184,23 @@ const INCUMBENT_ACTIONS: &[ActionSpec] = &[
         name: "休息與政見準備",
         description: "恢復體力，整理政策資料並為下一週做準備。",
         cost: 0,
-        base_swing: 0.2,
-        trust_delta: 0.1,
+        base_swing: 0.0,
+        trust_delta: 0.0,
         turnout_delta: 0.0,
         issues: &[],
         stamina_cost: 0.0,
-        stamina_recovery: 22.0,
+        stamina_recovery: 3.5,
     },
     ActionSpec {
         id: ActionId::PollCoordination,
         name: "對比／互比民調與整合協商",
         description: "檢視多候選人民調與對手互比，再嘗試整合一位落後候選人的支持。",
-        cost: 12,
-        base_swing: 0.7,
-        trust_delta: 0.6,
-        turnout_delta: 0.6,
+        cost: 2,
+        base_swing: 0.14,
+        trust_delta: 0.12,
+        turnout_delta: 0.08,
         issues: &[Issue::Governance, Issue::Trust],
-        stamina_cost: 7.0,
+        stamina_cost: 0.8,
         stamina_recovery: 0.0,
     },
 ];
@@ -196,65 +210,65 @@ const CHALLENGER_ACTIONS: &[ActionSpec] = &[
         id: ActionId::CommunityTour,
         name: "社區走訪與傾聽",
         description: "進行公開的地方走訪，把居民回饋納入政策提案。",
-        cost: 12,
-        base_swing: 1.45,
-        trust_delta: 1.0,
-        turnout_delta: 1.2,
+        cost: 2,
+        base_swing: 0.30,
+        trust_delta: 0.22,
+        turnout_delta: 0.22,
         issues: &[Issue::Local, Issue::Rights, Issue::Education],
-        stamina_cost: 10.0,
+        stamina_cost: 1.3,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::PolicyForum,
         name: "政見論壇與辯論",
         description: "以可檢驗的政策選項與對手比較，強化政策可信度。",
-        cost: 12,
-        base_swing: 1.65,
-        trust_delta: 1.4,
-        turnout_delta: 0.6,
+        cost: 2,
+        base_swing: 0.34,
+        trust_delta: 0.24,
+        turnout_delta: 0.12,
         issues: &[
             Issue::Economy,
             Issue::CrossStrait,
             Issue::Governance,
             Issue::PublicHealth,
         ],
-        stamina_cost: 8.0,
+        stamina_cost: 1.1,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::LegalAssembly,
         name: "合法集會／公民行動",
         description: "舉辦和平、依法申請的集會，提升議題能見度與參與。",
-        cost: 8,
-        base_swing: 1.35,
-        trust_delta: 0.4,
-        turnout_delta: 2.0,
+        cost: 2,
+        base_swing: 0.26,
+        trust_delta: 0.12,
+        turnout_delta: 0.32,
         issues: &[Issue::Civic, Issue::Media, Issue::Education, Issue::Rights],
-        stamina_cost: 13.0,
+        stamina_cost: 1.8,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::CoalitionTalks,
         name: "跨黨協調與組織整合",
         description: "協調理念相近的團體與地方組織，擴大合作基礎。",
-        cost: 14,
-        base_swing: 1.25,
-        trust_delta: 1.0,
-        turnout_delta: 0.8,
+        cost: 2,
+        base_swing: 0.12,
+        trust_delta: 0.20,
+        turnout_delta: 0.12,
         issues: &[Issue::Civic, Issue::Governance, Issue::CrossStrait],
-        stamina_cost: 7.0,
+        stamina_cost: 0.8,
         stamina_recovery: 0.0,
     },
     ActionSpec {
         id: ActionId::OversightPetition,
         name: "監督提案與公開連署",
         description: "透過可查證資料提出監督議題、具體替代方案與公開連署。",
-        cost: 9,
-        base_swing: 1.45,
-        trust_delta: 1.0,
-        turnout_delta: 0.6,
+        cost: 1,
+        base_swing: 0.28,
+        trust_delta: 0.22,
+        turnout_delta: 0.12,
         issues: &[Issue::Trust, Issue::Media, Issue::Governance],
-        stamina_cost: 7.0,
+        stamina_cost: 0.8,
         stamina_recovery: 0.0,
     },
     ActionSpec {
@@ -262,11 +276,11 @@ const CHALLENGER_ACTIONS: &[ActionSpec] = &[
         name: "公開政策問答",
         description: "以低成本發布可核實的政策說明與問答。",
         cost: 0,
-        base_swing: 0.45,
-        trust_delta: 0.2,
-        turnout_delta: 0.25,
+        base_swing: 0.10,
+        trust_delta: 0.08,
+        turnout_delta: 0.06,
         issues: &[Issue::Trust, Issue::Media],
-        stamina_cost: 2.0,
+        stamina_cost: 0.3,
         stamina_recovery: 0.0,
     },
     ActionSpec {
@@ -274,23 +288,23 @@ const CHALLENGER_ACTIONS: &[ActionSpec] = &[
         name: "休息與政見準備",
         description: "恢復體力，整理政策資料並為下一週做準備。",
         cost: 0,
-        base_swing: 0.2,
-        trust_delta: 0.1,
+        base_swing: 0.0,
+        trust_delta: 0.0,
         turnout_delta: 0.0,
         issues: &[],
         stamina_cost: 0.0,
-        stamina_recovery: 22.0,
+        stamina_recovery: 3.5,
     },
     ActionSpec {
         id: ActionId::PollCoordination,
         name: "對比／互比民調與整合協商",
         description: "檢視多候選人民調與對手互比，再嘗試整合一位落後候選人的支持。",
-        cost: 12,
-        base_swing: 0.7,
-        trust_delta: 0.6,
-        turnout_delta: 0.6,
+        cost: 2,
+        base_swing: 0.14,
+        trust_delta: 0.12,
+        turnout_delta: 0.08,
         issues: &[Issue::Governance, Issue::Trust],
-        stamina_cost: 7.0,
+        stamina_cost: 0.8,
         stamina_recovery: 0.0,
     },
 ];
@@ -320,14 +334,18 @@ pub struct GameState {
     pub player_index: usize,
     pub candidates: Vec<SimCandidate>,
     pub polls: Vec<f64>,
+    pub voter_segments: Vec<VoterSegmentPoll>,
     pub budget: i32,
     pub trust: f64,
     pub turnout_momentum: f64,
     pub stamina: f64,
     pub round: u8,
+    pub day: u8,
     pub events: Vec<&'static EventCard>,
     action_uses: [u8; 12],
     matched_events: u8,
+    pub poll_taken_this_week: bool,
+    pub coalition_this_week: bool,
     rng: Rng,
 }
 
@@ -344,7 +362,15 @@ pub struct ActionOutcome {
     pub weekly_funding: i32,
     pub budget_after: i32,
     pub coordination_note: Option<String>,
-    pub round: u8,
+    pub week: u8,
+    pub day: u8,
+}
+
+#[derive(Clone, Debug)]
+pub struct VoterSegmentPoll {
+    pub name: &'static str,
+    pub weight_pct: f64,
+    pub polls: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -423,11 +449,27 @@ impl GameState {
         style: CampaignStyle,
         region: &'static RegionProfile,
     ) -> Self {
+        Self::new_local_with_party(campaign_year, side, seed, style, region, None)
+    }
+
+    pub fn new_local_with_party(
+        campaign_year: u16,
+        side: Side,
+        seed: u64,
+        style: CampaignStyle,
+        region: &'static RegionProfile,
+        selected_party: Option<&'static PartyProfile>,
+    ) -> Self {
         let mut game =
             Self::from_election(campaign_year, side, baseline_election(2024), seed, style);
         game.baseline_year = 2022;
         game.region = Some(region);
-        let (parties, shares) = local_slate(region);
+        let (mut parties, shares) = local_slate(region);
+        if let Some(selected_party) = selected_party {
+            if !parties.contains(&selected_party.name) {
+                parties[2] = selected_party.name;
+            }
+        }
         game.candidates = parties
             .iter()
             .zip(shares)
@@ -438,9 +480,12 @@ impl GameState {
             })
             .collect();
         game.polls = shares.to_vec();
+        game.voter_segments = make_voter_segments(&game.polls);
         game.player_index = match side {
             Side::Incumbent => 0,
-            Side::Challenger => 1,
+            Side::Challenger => selected_party
+                .and_then(|party| parties.iter().position(|name| *name == party.name))
+                .unwrap_or(1),
         };
         game
     }
@@ -479,6 +524,7 @@ impl GameState {
             Side::Incumbent => (54.0, 50.0),
             Side::Challenger => (50.0, 50.0),
         };
+        let voter_segments = make_voter_segments(&polls);
 
         Self {
             campaign_year,
@@ -490,14 +536,18 @@ impl GameState {
             player_index,
             candidates,
             polls,
+            voter_segments,
             budget: 100,
             trust,
             turnout_momentum,
             stamina: 100.0,
             round: 0,
+            day: 0,
             events: events_for_campaign(campaign_year),
             action_uses: [0; 12],
             matched_events: 0,
+            poll_taken_this_week: false,
+            coalition_this_week: false,
             rng: Rng::new(seed),
         }
     }
@@ -526,20 +576,31 @@ impl GameState {
         if id == ActionId::PollCoordination && self.candidates.len() < 3 {
             return Err("至少三位候選人時才有整合協商議題。".to_string());
         }
+        if id == ActionId::PollCoordination && self.poll_taken_this_week {
+            return Err("本週已完成民調協調；每週最多一次。".to_string());
+        }
+        if id == ActionId::CoalitionTalks && self.candidates.len() < 3 {
+            return Err("至少三位候選人時才有第三勢力協商議題。".to_string());
+        }
+        if id == ActionId::CoalitionTalks && self.coalition_this_week {
+            return Err("本週已進行跨黨協商；每週最多一次。".to_string());
+        }
 
         let share_before = self.polls[self.player_index];
+        let week = self.round + 1;
+        let day = self.day + 1;
         let current_event = self.current_event();
         let event_title = current_event.map(|event| event.title);
         let event_match = current_event
             .filter(|event| action.issues.contains(&event.issue))
             .is_some();
-        let issue_bonus = if event_match { 0.65 } else { 0.0 };
+        let issue_bonus = if event_match { 0.12 } else { 0.0 };
         let local_match = self
             .region
             .filter(|region| action.issues.contains(&region.focus))
-            .map(|_| 0.4)
+            .map(|_| 0.08)
             .unwrap_or(0.0);
-        let trust_bonus = ((self.trust - 50.0) * 0.015).clamp(-0.45, 0.55);
+        let trust_bonus = ((self.trust - 50.0) * 0.004).clamp(-0.2, 0.2);
         let skill = match action.id {
             ActionId::PolicyDelivery | ActionId::CrisisResponse | ActionId::PolicyForum => {
                 self.player_attributes.policy
@@ -554,15 +615,15 @@ impl GameState {
             | ActionId::RestAndPrepare
             | ActionId::PollCoordination => self.player_attributes.communication,
         };
-        let skill_bonus = ((skill - 50.0) * 0.02).clamp(-0.6, 0.6);
+        let skill_bonus = ((skill - 50.0) * 0.006).clamp(-0.2, 0.2);
         let fatigue_penalty = if self.stamina < 20.0 {
-            -0.55
+            -0.12
         } else if self.stamina < 45.0 {
-            -0.25
+            -0.06
         } else {
             0.0
         };
-        let jitter = self.rng.between(-0.25, 0.25);
+        let jitter = self.rng.between(-0.07, 0.07);
         let swing = if id == ActionId::RestAndPrepare {
             0.0
         } else {
@@ -573,24 +634,26 @@ impl GameState {
                 + skill_bonus
                 + fatigue_penalty
                 + jitter)
-                .clamp(0.1, 3.2)
+                .clamp(-0.2, 0.55)
         };
 
         self.budget -= action.cost;
-        shift_share(&mut self.polls, self.player_index, swing);
+        if swing.abs() > f64::EPSILON {
+            self.apply_segment_swing(self.player_index, swing, action.issues);
+        }
 
         let mut coordination_note = None;
         if id == ActionId::PollCoordination {
             if let Some(target) = self.weakest_rival() {
-                let success_chance = (0.42
-                    + (self.trust - 50.0) * 0.006
-                    + (self.player_attributes.communication - 50.0) * 0.008)
-                    .clamp(0.18, 0.82);
+                let success_chance = (0.30
+                    + (self.trust - 50.0) * 0.003
+                    + (self.player_attributes.communication - 50.0) * 0.006)
+                    .clamp(0.12, 0.72);
                 if self.rng.unit() < success_chance {
-                    let transfer = self.polls[target] * 0.16;
-                    transfer_share(&mut self.polls, target, self.player_index, transfer);
+                    let rate = self.rng.between(0.04, 0.08);
+                    let transfer = self.transfer_segment_support(target, rate);
                     coordination_note = Some(format!(
-                        "協商成功：{} 的部分支持轉向玩家陣營（模型轉移 {:.1} 個百分點）",
+                        "互比後協調成功：{} 的部分支持轉向玩家陣營（模型轉移 {:.1} 個百分點）",
                         self.candidates[target].party, transfer
                     ));
                 } else {
@@ -600,15 +663,39 @@ impl GameState {
                     ));
                 }
             }
+            self.poll_taken_this_week = true;
+        }
+        if id == ActionId::CoalitionTalks {
+            if let Some(target) = self.most_compatible_rival() {
+                let affinity = party_affinity(
+                    self.candidates[self.player_index].party,
+                    self.candidates[target].party,
+                );
+                let success_chance =
+                    (0.14 + affinity * 0.005 + (self.trust - 50.0) * 0.002).clamp(0.08, 0.72);
+                if self.rng.unit() < success_chance {
+                    let rate = self.rng.between(0.04, 0.09);
+                    let transfer = self.transfer_segment_support(target, rate);
+                    coordination_note = Some(format!(
+                        "與 {} 協商成功（議題接近度 {:.0}/100），模型整合 {:.1} 個百分點支持；此為情境效果，非固定聯盟。",
+                        self.candidates[target].party, affinity, transfer
+                    ));
+                } else {
+                    coordination_note = Some(format!(
+                        "已與 {} 接觸（議題接近度 {:.0}/100），但本週未形成合作共識。",
+                        self.candidates[target].party, affinity
+                    ));
+                }
+            }
+            self.coalition_this_week = true;
         }
 
-        // A competing campaign reacts every round. This small, seeded counter-
-        // swing represents ordinary campaign competition rather than an event
-        // assigning a partisan outcome.
+        // A competing campaign responds to daily activity with a small seeded
+        // movement; this is a model parameter, not a historical vote estimate.
         if id != ActionId::RestAndPrepare {
             if let Some(rival_index) = self.strongest_rival() {
-                let counter_swing = self.rng.between(0.08, 0.42);
-                shift_share(&mut self.polls, rival_index, counter_swing);
+                let counter_swing = self.rng.between(0.02, 0.09);
+                self.apply_segment_swing(rival_index, counter_swing, &[]);
             }
         }
 
@@ -620,11 +707,18 @@ impl GameState {
         if event_match {
             self.matched_events = self.matched_events.saturating_add(1);
         }
-        let before_funding = self.budget;
-        self.budget = (self.budget + WEEKLY_FUNDING).min(MAX_BUDGET);
-        let weekly_funding = self.budget - before_funding;
-        self.round += 1;
-        normalize(&mut self.polls);
+        let mut weekly_funding = 0;
+        if day == DAYS_PER_WEEK {
+            let before_funding = self.budget;
+            self.budget = (self.budget + WEEKLY_FUNDING).min(MAX_BUDGET);
+            weekly_funding = self.budget - before_funding;
+            self.round += 1;
+            self.day = 0;
+            self.poll_taken_this_week = false;
+            self.coalition_this_week = false;
+        } else {
+            self.day += 1;
+        }
 
         Ok(ActionOutcome {
             action_name: action.name,
@@ -638,7 +732,8 @@ impl GameState {
             weekly_funding,
             budget_after: self.budget,
             coordination_note,
-            round: self.round,
+            week,
+            day,
         })
     }
 
@@ -660,13 +755,20 @@ impl GameState {
         .map(|id| self.action_uses[action_index(*id)] as f64)
         .sum::<f64>();
         let unique_actions = self.action_uses.iter().filter(|count| **count > 0).count() as f64;
+        let completed_days = (self.round as f64 * DAYS_PER_WEEK as f64) + self.day as f64;
+        let policy_ratio = if completed_days > 0.0 {
+            policy_actions / completed_days
+        } else {
+            0.0
+        };
         CampaignReview {
-            policy: (35.0 + policy_actions * 8.0).clamp(0.0, 100.0),
+            policy: (25.0 + policy_ratio * 500.0).clamp(0.0, 100.0),
             trust: self.trust,
             mobilization: self.turnout_momentum,
-            event_response: (35.0 + self.matched_events as f64 * 12.0).clamp(0.0, 100.0),
+            event_response: (30.0 + (self.matched_events as f64 / completed_days.max(1.0)) * 180.0)
+                .clamp(0.0, 100.0),
             resource_management: (55.0 + (self.budget as f64 * 0.25)).clamp(0.0, 100.0),
-            versatility: (unique_actions * (100.0 / 7.0)).clamp(0.0, 100.0),
+            versatility: (unique_actions * (100.0 / 8.0)).clamp(0.0, 100.0),
         }
     }
 
@@ -717,6 +819,79 @@ impl GameState {
             .min_by(|(_, left), (_, right)| left.total_cmp(right))
             .map(|(index, _)| index)
     }
+
+    fn most_compatible_rival(&self) -> Option<usize> {
+        self.candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != self.player_index)
+            .max_by(|(_, left), (_, right)| {
+                party_affinity(self.candidates[self.player_index].party, left.party).total_cmp(
+                    &party_affinity(self.candidates[self.player_index].party, right.party),
+                )
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn apply_segment_swing(&mut self, candidate_index: usize, swing: f64, issues: &[Issue]) {
+        if self.voter_segments.is_empty() {
+            shift_share(&mut self.polls, candidate_index, swing);
+            return;
+        }
+        let factors: Vec<f64> = VOTER_SEGMENTS
+            .iter()
+            .map(|segment| {
+                segment.responsiveness
+                    * if issues.contains(&segment.priority) {
+                        1.45
+                    } else {
+                        0.72
+                    }
+            })
+            .collect();
+        let weighted_mean = VOTER_SEGMENTS
+            .iter()
+            .zip(&factors)
+            .map(|(segment, factor)| segment.weight_pct * factor)
+            .sum::<f64>()
+            / 100.0;
+        for (segment, factor) in self.voter_segments.iter_mut().zip(factors) {
+            let segment_swing = if weighted_mean > f64::EPSILON {
+                swing * factor / weighted_mean
+            } else {
+                swing
+            };
+            shift_share(&mut segment.polls, candidate_index, segment_swing);
+        }
+        self.sync_polls_from_segments();
+    }
+
+    fn transfer_segment_support(&mut self, from: usize, rate: f64) -> f64 {
+        let mut total_transfer = 0.0;
+        for segment in &mut self.voter_segments {
+            if from >= segment.polls.len() || self.player_index >= segment.polls.len() {
+                continue;
+            }
+            let amount = segment.polls[from] * rate;
+            transfer_share(&mut segment.polls, from, self.player_index, amount);
+            total_transfer += amount * segment.weight_pct / 100.0;
+        }
+        self.sync_polls_from_segments();
+        total_transfer
+    }
+
+    fn sync_polls_from_segments(&mut self) {
+        if self.voter_segments.is_empty() {
+            return;
+        }
+        self.polls.fill(0.0);
+        for segment in &self.voter_segments {
+            for (total, share) in self.polls.iter_mut().zip(&segment.polls) {
+                *total += share * segment.weight_pct / 100.0;
+            }
+        }
+        normalize(&mut self.polls);
+    }
 }
 
 fn winner_index(shares: &[f64]) -> usize {
@@ -747,11 +922,31 @@ fn action_index(id: ActionId) -> usize {
 
 fn local_slate(region: &RegionProfile) -> ([&'static str; 3], [f64; 3]) {
     match region.previous_winner_party {
-        "民進黨" => (["民進黨", "國民黨", "民眾黨"], [43.0, 37.0, 20.0]),
-        "民眾黨" => (["民眾黨", "民進黨", "國民黨"], [39.0, 33.0, 28.0]),
-        "無黨籍" => (["無黨籍", "國民黨", "民進黨"], [38.0, 34.0, 28.0]),
-        _ => (["國民黨", "民進黨", "民眾黨"], [43.0, 37.0, 20.0]),
+        "民進黨" => (
+            ["民主進步黨", "中國國民黨", "台灣民眾黨"],
+            [43.0, 37.0, 20.0],
+        ),
+        "民眾黨" => (
+            ["台灣民眾黨", "民主進步黨", "中國國民黨"],
+            [39.0, 33.0, 28.0],
+        ),
+        "無黨籍" => (["無黨籍", "中國國民黨", "民主進步黨"], [38.0, 34.0, 28.0]),
+        _ => (
+            ["中國國民黨", "民主進步黨", "台灣民眾黨"],
+            [43.0, 37.0, 20.0],
+        ),
     }
+}
+
+fn make_voter_segments(polls: &[f64]) -> Vec<VoterSegmentPoll> {
+    VOTER_SEGMENTS
+        .iter()
+        .map(|segment| VoterSegmentPoll {
+            name: segment.name,
+            weight_pct: segment.weight_pct,
+            polls: polls.to_vec(),
+        })
+        .collect()
 }
 
 fn shift_share(shares: &mut [f64], candidate_index: usize, delta: f64) {
@@ -816,12 +1011,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actions_spend_budget_and_receive_weekly_funding() {
+    fn daily_actions_receive_funding_only_at_week_end() {
         let mut game = GameState::new(2024, Side::Incumbent, 123);
         let before = game.budget;
         let outcome = game.apply_action(ActionId::PolicyDelivery).unwrap();
-        assert_eq!(game.budget, before - 20 + WEEKLY_FUNDING);
-        assert_eq!(outcome.round, 1);
+        assert_eq!(game.budget, before - 3);
+        assert_eq!(outcome.week, 1);
+        assert_eq!(outcome.day, 1);
+        assert_eq!(outcome.weekly_funding, 0);
+        for _ in 1..DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        assert_eq!(game.round, 1);
+        assert_eq!(game.day, 0);
+        assert_eq!(game.budget, before - 3 + WEEKLY_FUNDING);
         assert!(game.polls.iter().all(|share| *share >= 0.0));
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
     }
@@ -851,11 +1054,10 @@ mod tests {
     }
 
     #[test]
-    fn twelve_round_limit_is_enforced() {
+    fn twelve_week_limit_is_enforced_after_eighty_four_daily_actions() {
         let mut game = GameState::new(2020, Side::Challenger, 1);
-        for _ in 0..CAMPAIGN_ROUNDS {
-            let action = actions_for(Side::Challenger)[0];
-            game.apply_action(action.id).unwrap();
+        for _ in 0..CAMPAIGN_ROUNDS * DAYS_PER_WEEK {
+            game.apply_action(ActionId::RestAndPrepare).unwrap();
         }
         assert!(game.is_finished());
         assert!(game.apply_action(ActionId::CommunityTour).is_err());
@@ -868,7 +1070,7 @@ mod tests {
         let polls_before = game.polls.clone();
         let result = game.apply_action(ActionId::RestAndPrepare).unwrap();
         assert_eq!(game.polls, polls_before);
-        assert_eq!(result.stamina_after, 62.0);
+        assert_eq!(result.stamina_after, 43.5);
     }
 
     #[test]
@@ -900,5 +1102,43 @@ mod tests {
         let outcome = game.apply_action(ActionId::PollCoordination).unwrap();
         assert!(outcome.coordination_note.is_some());
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
+        assert!(game.apply_action(ActionId::PollCoordination).is_err());
+    }
+
+    #[test]
+    fn third_party_candidate_can_negotiate_a_coalition_once_per_week() {
+        let region = crate::history::find_region("臺北市").unwrap();
+        let party = crate::history::find_party("新黨").unwrap();
+        let mut game = GameState::new_local_with_party(
+            2026,
+            Side::Challenger,
+            888,
+            CampaignStyle::Organizer,
+            region,
+            Some(party),
+        );
+        assert_eq!(game.candidates[game.player_index].party, "新黨");
+        let outcome = game.apply_action(ActionId::CoalitionTalks).unwrap();
+        assert!(outcome.coordination_note.is_some());
+        assert!(game.apply_action(ActionId::CoalitionTalks).is_err());
+    }
+
+    #[test]
+    fn voter_segment_weights_sum_to_one_hundred_and_update() {
+        let mut game = GameState::new(2024, Side::Challenger, 17);
+        let weight: f64 = game
+            .voter_segments
+            .iter()
+            .map(|segment| segment.weight_pct)
+            .sum();
+        assert!((weight - 100.0).abs() < 0.001);
+        game.apply_action(ActionId::PolicyForum).unwrap();
+        assert!(game
+            .voter_segments
+            .iter()
+            .any(
+                |segment| (segment.polls[game.player_index] - game.polls[game.player_index]).abs()
+                    > 0.01
+            ));
     }
 }

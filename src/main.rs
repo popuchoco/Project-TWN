@@ -1,7 +1,11 @@
-use project_twn::history::{find_region, ELECTIONS, LEGISLATURE_SNAPSHOTS, REGIONS};
+use project_twn::history::{
+    find_party, find_region, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS, PARTY_PROFILES, REGIONS,
+    VOTER_SEGMENTS,
+};
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
     actions_for, ActionId, CampaignStyle, ElectionOutcome, GameState, Side, CAMPAIGN_ROUNDS,
+    DAYS_PER_WEEK,
 };
 use std::env;
 use std::fs::OpenOptions;
@@ -16,7 +20,9 @@ struct Options {
     auto: bool,
     history: bool,
     list_regions: bool,
+    list_parties: bool,
     region: Option<String>,
+    party: Option<String>,
     primary: bool,
     log: Option<String>,
 }
@@ -39,10 +45,14 @@ fn run() -> Result<(), String> {
         print_regions();
         return Ok(());
     }
+    if options.list_parties {
+        print_parties();
+        return Ok(());
+    }
 
     let role = match options.role {
         Some(role) => role,
-        None if options.auto => Side::Challenger,
+        None if options.auto || options.party.is_some() => Side::Challenger,
         None => ask_role()?,
     };
     let style = if options.primary {
@@ -60,10 +70,33 @@ fn run() -> Result<(), String> {
     if region.is_some() && options.year != 2026 {
         return Err("地方首長模式目前是 2026 前瞻情境，請使用 --year 2026。".to_string());
     }
-    let mut game = match region {
-        Some(region) => {
-            GameState::new_local_with_style(options.year, role, options.seed, style, region)
+    let selected_party = match options.party.as_deref() {
+        Some(query) => Some(
+            find_party(query)
+                .ok_or_else(|| format!("找不到政黨模板：{query}。使用 --parties 查看清單。"))?,
+        ),
+        None => None,
+    };
+    if selected_party.is_some() && region.is_none() {
+        return Err("--party 只適用於搭配 --region 的地方情境。".to_string());
+    }
+    if let (Some(party), Some(region)) = (selected_party, region) {
+        let previous_party = find_party(region.previous_winner_party)
+            .map(|profile| profile.name)
+            .unwrap_or(region.previous_winner_party);
+        if role == Side::Incumbent && party.name != previous_party {
+            return Err("執政方 --party 必須符合該地 2022 上屆首長政黨；若扮演其他政黨請選 --role challenger。".to_string());
         }
+    }
+    let mut game = match region {
+        Some(region) => GameState::new_local_with_party(
+            options.year,
+            role,
+            options.seed,
+            style,
+            region,
+            selected_party,
+        ),
         None => GameState::new_with_style(options.year, role, options.seed, style),
     };
     print_intro(&game, options.seed);
@@ -91,7 +124,9 @@ fn parse_args() -> Result<Options, String> {
         auto: false,
         history: false,
         list_regions: false,
+        list_parties: false,
         region: None,
+        party: None,
         primary: false,
         log: None,
     };
@@ -103,12 +138,19 @@ fn parse_args() -> Result<Options, String> {
             }
             "--history" => options.history = true,
             "--regions" => options.list_regions = true,
+            "--parties" => options.list_parties = true,
             "--auto" | "--demo" => options.auto = true,
             "--primary" => options.primary = true,
             "--region" => {
                 options.region = Some(
                     args.next()
                         .ok_or_else(|| "--region 後面需要縣市名稱或代碼".to_string())?,
+                )
+            }
+            "--party" => {
+                options.party = Some(
+                    args.next()
+                        .ok_or_else(|| "--party 後面需要政黨名稱或別名".to_string())?,
                 )
             }
             "--log" => {
@@ -229,7 +271,11 @@ fn print_intro(game: &GameState, seed: u64) {
             println!("2026全國代理情境：以2024總統票作全國基準，不是地方候選人或縣市民調；地方投票日為 2026-11-28。" );
         }
     }
-    println!("競選週數：{CAMPAIGN_ROUNDS}（布局／議題攻防／決戰三階段）　可用預算：{}　信任：{:.1}/100　體力：{:.1}/100", game.budget, game.trust, game.stamina);
+    println!("競選期：{CAMPAIGN_ROUNDS} 週 × {DAYS_PER_WEEK} 天，共 {} 個每日決策（布局／議題攻防／決戰三階段）；起始預算：{}　信任：{:.1}/100　體力：{:.1}/100", CAMPAIGN_ROUNDS as u16 * DAYS_PER_WEEK as u16, game.budget, game.trust, game.stamina);
+    println!(
+        "選民結構：{} 個遊戲用選民原型；權重是可調模型參數，不代表實際人口或選民占比。",
+        VOTER_SEGMENTS.len()
+    );
     println!(
         "玩家能力值（遊戲建構，非歷史評分）：政策 {:.0}／組織 {:.0}／溝通 {:.0}\n",
         game.player_attributes.policy,
@@ -262,6 +308,14 @@ fn print_poll_table(game: &GameState) {
             candidate.name, game.polls[index]
         );
     }
+    println!("選民原型細分（權重／玩家支持）— 僅供觀察遊戲模型：");
+    for segment in &game.voter_segments {
+        let player_support = segment.polls.get(game.player_index).copied().unwrap_or(0.0);
+        println!(
+            "  {:<20} {:>4.0}%／{:>5.1}%",
+            segment.name, segment.weight_pct, player_support
+        );
+    }
     if game.candidates.len() > 2 {
         println!("互比式情境：若只比較玩家與單一對手，其他候選人的支持暫按各半轉移；這是遊戲簡化值，並非交叉民調。" );
         for (index, candidate) in game
@@ -285,9 +339,11 @@ fn print_poll_table(game: &GameState) {
 fn run_interactive(game: &mut GameState) -> Result<(), String> {
     while !game.is_finished() {
         println!(
-            "\n--- 第 {} / {} 週｜{} ---",
+            "\n--- 第 {} / {} 週・第 {} / {} 天｜{} ---",
             game.round + 1,
             CAMPAIGN_ROUNDS,
+            game.day + 1,
+            DAYS_PER_WEEK,
             game.phase_label()
         );
         println!(
@@ -300,7 +356,7 @@ fn run_interactive(game: &mut GameState) -> Result<(), String> {
         let actions: Vec<_> = actions_for(game.side)
             .iter()
             .copied()
-            .filter(|action| action.id != ActionId::PollCoordination || game.candidates.len() >= 3)
+            .filter(|action| action_available(game, action.id))
             .collect();
         for (index, action) in actions.iter().enumerate() {
             println!(
@@ -358,19 +414,19 @@ fn run_auto(game: &mut GameState) {
         ],
     };
     while !game.is_finished() {
-        let preferred_id = preferred[game.round as usize % preferred.len()];
+        let preferred_id = preferred
+            [(game.round as usize * DAYS_PER_WEEK as usize + game.day as usize) % preferred.len()];
         let selected = actions
             .iter()
             .find(|action| {
                 action.id == preferred_id
                     && action.cost <= game.budget
-                    && (action.id != ActionId::PollCoordination || game.candidates.len() >= 3)
+                    && action_available(game, action.id)
             })
             .or_else(|| {
-                actions.iter().find(|action| {
-                    action.cost <= game.budget
-                        && (action.id != ActionId::PollCoordination || game.candidates.len() >= 3)
-                })
+                actions
+                    .iter()
+                    .find(|action| action.cost <= game.budget && action_available(game, action.id))
             });
         let Some(action) = selected else { break };
         if let Ok(outcome) = game.apply_action(action.id) {
@@ -381,7 +437,9 @@ fn run_auto(game: &mut GameState) {
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
     println!(
-        "✓ {}：玩家民調 {:.2}% → {:.2}%（費用 {}、週資金 +{}、餘額 {}）",
+        "✓ 第 {} 週・第 {} 天 {}：玩家民調 {:.2}% → {:.2}%（費用 {}、本週補給 +{}、餘額 {}）",
+        outcome.week,
+        outcome.day,
         outcome.action_name,
         outcome.share_before,
         outcome.share_after,
@@ -399,7 +457,17 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
         "  信任 {:.1}/100，動員指數 {:.1}/100，體力 {:.1}/100",
         outcome.trust_after, outcome.turnout_after, outcome.stamina_after
     );
-    print_poll_table(game);
+    if outcome.day == DAYS_PER_WEEK {
+        print_poll_table(game);
+    }
+}
+
+fn action_available(game: &GameState, id: ActionId) -> bool {
+    match id {
+        ActionId::PollCoordination => game.candidates.len() >= 3 && !game.poll_taken_this_week,
+        ActionId::CoalitionTalks => game.candidates.len() >= 3 && !game.coalition_this_week,
+        _ => true,
+    }
 }
 
 fn print_final(game: &mut GameState) -> ElectionOutcome {
@@ -537,6 +605,17 @@ fn print_regions() {
     }
 }
 
+fn print_parties() {
+    println!("可選第三勢力／政黨情境模板（不代表每一黨都會參加2026選舉；軸線是策略參數）\n");
+    for party in PARTY_PROFILES {
+        println!(
+            "  {:<12} {:<18} {}",
+            party.name, party.camp, party.description
+        );
+    }
+    println!("\n地方模式使用：--year 2026 --region 縣市 --role challenger --party 政黨名稱");
+}
+
 fn save_campaign_log(
     path: &str,
     game: &GameState,
@@ -603,11 +682,22 @@ fn print_history() {
     for snapshot in LEGISLATURE_SNAPSHOTS {
         println!("  {}：{}", snapshot.year, snapshot.summary);
     }
+    println!("\n近代台灣選戰與社會事件（事件說明為背景摘要，不是單一因果判斷）");
+    for event in EVENTS {
+        println!("  {}｜{}：{}", event.year, event.title, event.description);
+    }
+    println!("\n選民原型（遊戲權重，不是實際人口占比）");
+    for segment in VOTER_SEGMENTS {
+        println!(
+            "  {:<20} {:>4.0}%｜{}",
+            segment.name, segment.weight_pct, segment.description
+        );
+    }
     println!(
         "\n2026：地方公職人員選舉投票日為 2026-11-28；截至 2026-11-08 尚未投票，故不列結果。\n"
     );
 }
 
 fn print_usage() {
-    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --simulate [年份] [--region 縣市] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --primary --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n\n年份範圍：1996–2026。地方模式可用 --regions 查看22縣市，2026情境只把2022首長政黨作參考，得票比例為遊戲設定。--primary 先進行四回合黨內初選；一般競選共12回合。每週有資金補給。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可把每場結果與雷達分數附加到 TSV，便於保存長期戰績。");
+    println!("Project-TWN — 臺灣選戰模擬器\n\n使用方式：\n  project-twn --history\n  project-twn --regions\n  project-twn --parties\n  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger] [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]\n\n範例：\n  cargo run -- --simulate 2024 --role challenger --style organizer --seed 42\n  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto\n  cargo run -- --history\n  cargo run -- --regions\n  cargo run -- --parties\n\n年份範圍：1996–2026。地方模式可用 --regions 查看22縣市；--parties 查看歷史政黨模板。競選為12週、每週7天，共84次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。\n省略 --role 會詢問陣營；--auto 會以在野方跑完示範。--log 可把每場結果與雷達分數附加到 TSV，便於保存長期戰績。");
 }
