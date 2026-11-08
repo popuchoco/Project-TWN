@@ -1215,6 +1215,9 @@ fn run_auto_mode(
                     if let Some(event) = game.current_event() {
                         println!("背景事件：{} — {}", event.title, event.description);
                     }
+                    if brief.index == 4 {
+                        print_staffer_poll_brief(game);
+                    }
                 }
                 let selected = brief
                     .choices
