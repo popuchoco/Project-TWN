@@ -759,10 +759,7 @@ fn save_batch_log(
 }
 
 fn tsv_cell(value: &str) -> String {
-    value
-        .replace('\t', " ")
-        .replace('\r', " ")
-        .replace('\n', " ")
+    value.replace(['\t', '\r', '\n'], " ")
 }
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
