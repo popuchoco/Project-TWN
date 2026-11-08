@@ -1,6 +1,6 @@
 use project_twn::history::{
-    find_party, find_region, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS, PARTY_PROFILES, PartyProfile,
-    RegionProfile, REGIONS, VOTER_SEGMENTS,
+    find_party, find_region, PartyProfile, RegionProfile, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS,
+    PARTY_PROFILES, REGIONS, VOTER_SEGMENTS,
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
@@ -101,7 +101,13 @@ fn run() -> Result<(), String> {
 fn resolve_scenario(
     options: &Options,
     role: Side,
-) -> Result<(Option<&'static RegionProfile>, Option<&'static PartyProfile>), String> {
+) -> Result<
+    (
+        Option<&'static RegionProfile>,
+        Option<&'static PartyProfile>,
+    ),
+    String,
+> {
     let region = match options.region.as_deref() {
         Some(query) => Some(
             find_region(query)
@@ -142,14 +148,9 @@ fn new_scenario_game(
     selected_party: Option<&'static PartyProfile>,
 ) -> GameState {
     match region {
-        Some(region) => GameState::new_local_with_party(
-            options.year,
-            role,
-            seed,
-            style,
-            region,
-            selected_party,
-        ),
+        Some(region) => {
+            GameState::new_local_with_party(options.year, role, seed, style, region, selected_party)
+        }
         None => GameState::new_with_style(options.year, role, seed, style),
     }
 }
@@ -626,7 +627,10 @@ fn run_batch(
         println!("玩家政黨情境：{}。", party.name);
     }
     for style in &styles {
-        let group: Vec<_> = records.iter().filter(|record| record.style == *style).collect();
+        let group: Vec<_> = records
+            .iter()
+            .filter(|record| record.style == *style)
+            .collect();
         let count = group.len() as f64;
         let wins = group.iter().filter(|record| record.player_won).count() as f64;
         let mean_model_probability = group
@@ -639,11 +643,8 @@ fn run_batch(
             .map(|record| record.player_final_share)
             .sum::<f64>()
             / count;
-        let mean_signed_margin = group
-            .iter()
-            .map(|record| record.signed_margin)
-            .sum::<f64>()
-            / count;
+        let mean_signed_margin =
+            group.iter().map(|record| record.signed_margin).sum::<f64>() / count;
         let mean_objectives = group
             .iter()
             .map(|record| f64::from(record.objectives_completed))
@@ -705,10 +706,7 @@ fn save_batch_log(
             .read_line(&mut header)
             .map_err(|error| error.to_string())?;
         if header.trim_end() != BATCH_LOG_HEADER {
-            return Err(
-                "批次紀錄欄位與目前版本不同，請指定新的 --batch-log 檔名以免混合格式。"
-                    .to_string(),
-            );
+            return Err("批次紀錄欄位與目前版本不同，請指定新的 --batch-log 檔名以免混合格式。".to_string());
         }
     }
     let mut file = OpenOptions::new()
@@ -759,7 +757,10 @@ fn save_batch_log(
 }
 
 fn tsv_cell(value: &str) -> String {
-    value.replace('\t', " ").replace('\r', " ").replace('\n', " ")
+    value
+        .replace('\t', " ")
+        .replace('\r', " ")
+        .replace('\n', " ")
 }
 
 fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
@@ -1102,7 +1103,8 @@ mod tests {
     #[test]
     fn batch_autopilot_is_reproducible_for_a_fixed_seed_and_style() {
         let mut left = GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
-        let mut right = GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
+        let mut right =
+            GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
         run_auto(&mut left, false);
         run_auto(&mut right, false);
         assert_eq!(left.polls, right.polls);
