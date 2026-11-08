@@ -85,6 +85,112 @@ pub enum CampaignStyle {
     Communicator,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SensitivityParameter {
+    ActionSwing,
+    EventBonus,
+    LocalFocusBonus,
+    TrustModifier,
+    FatiguePenalty,
+    DailyNoise,
+    TerminalNoise,
+}
+
+impl SensitivityParameter {
+    pub const ALL: [Self; 7] = [
+        Self::ActionSwing,
+        Self::EventBonus,
+        Self::LocalFocusBonus,
+        Self::TrustModifier,
+        Self::FatiguePenalty,
+        Self::DailyNoise,
+        Self::TerminalNoise,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::ActionSwing => "action_swing",
+            Self::EventBonus => "event_bonus",
+            Self::LocalFocusBonus => "local_focus_bonus",
+            Self::TrustModifier => "trust_modifier",
+            Self::FatiguePenalty => "fatigue_penalty",
+            Self::DailyNoise => "daily_noise",
+            Self::TerminalNoise => "terminal_noise",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ActionSwing => "行動基礎效果",
+            Self::EventBonus => "事件議題加成",
+            Self::LocalFocusBonus => "地方焦點加成",
+            Self::TrustModifier => "信任修正",
+            Self::FatiguePenalty => "疲勞懲罰",
+            Self::DailyNoise => "每日隨機波動",
+            Self::TerminalNoise => "終局誤差範圍",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelParameters {
+    action_swing: f64,
+    event_bonus: f64,
+    local_focus_bonus: f64,
+    trust_modifier: f64,
+    fatigue_penalty: f64,
+    daily_noise: f64,
+    terminal_noise: f64,
+}
+
+impl ModelParameters {
+    pub fn with_multiplier(
+        mut self,
+        parameter: SensitivityParameter,
+        multiplier: f64,
+    ) -> Result<Self, &'static str> {
+        if !multiplier.is_finite() || !(0.0..=3.0).contains(&multiplier) {
+            return Err("model parameter multipliers must be finite and within 0..=3");
+        }
+        match parameter {
+            SensitivityParameter::ActionSwing => self.action_swing = multiplier,
+            SensitivityParameter::EventBonus => self.event_bonus = multiplier,
+            SensitivityParameter::LocalFocusBonus => self.local_focus_bonus = multiplier,
+            SensitivityParameter::TrustModifier => self.trust_modifier = multiplier,
+            SensitivityParameter::FatiguePenalty => self.fatigue_penalty = multiplier,
+            SensitivityParameter::DailyNoise => self.daily_noise = multiplier,
+            SensitivityParameter::TerminalNoise => self.terminal_noise = multiplier,
+        }
+        Ok(self)
+    }
+
+    fn multiplier(self, parameter: SensitivityParameter) -> f64 {
+        match parameter {
+            SensitivityParameter::ActionSwing => self.action_swing,
+            SensitivityParameter::EventBonus => self.event_bonus,
+            SensitivityParameter::LocalFocusBonus => self.local_focus_bonus,
+            SensitivityParameter::TrustModifier => self.trust_modifier,
+            SensitivityParameter::FatiguePenalty => self.fatigue_penalty,
+            SensitivityParameter::DailyNoise => self.daily_noise,
+            SensitivityParameter::TerminalNoise => self.terminal_noise,
+        }
+    }
+}
+
+impl Default for ModelParameters {
+    fn default() -> Self {
+        Self {
+            action_swing: 1.0,
+            event_bonus: 1.0,
+            local_focus_bonus: 1.0,
+            trust_modifier: 1.0,
+            fatigue_penalty: 1.0,
+            daily_noise: 1.0,
+            terminal_noise: 1.0,
+        }
+    }
+}
+
 impl CampaignStyle {
     pub fn label(self) -> &'static str {
         match self {
@@ -448,6 +554,7 @@ pub struct GameState {
     pub region: Option<&'static RegionProfile>,
     pub side: Side,
     pub style: CampaignStyle,
+    model_parameters: ModelParameters,
     pub player_attributes: CandidateAttributes,
     pub player_index: usize,
     pub candidates: Vec<SimCandidate>,
@@ -569,8 +676,24 @@ impl GameState {
     }
 
     pub fn new_with_style(campaign_year: u16, side: Side, seed: u64, style: CampaignStyle) -> Self {
+        Self::new_with_style_and_parameters(
+            campaign_year,
+            side,
+            seed,
+            style,
+            ModelParameters::default(),
+        )
+    }
+
+    pub fn new_with_style_and_parameters(
+        campaign_year: u16,
+        side: Side,
+        seed: u64,
+        style: CampaignStyle,
+        model_parameters: ModelParameters,
+    ) -> Self {
         let election = baseline_election(campaign_year);
-        Self::from_election(campaign_year, side, election, seed, style)
+        Self::from_election(campaign_year, side, election, seed, style, model_parameters)
     }
 
     pub fn new_local_with_style(
@@ -591,8 +714,34 @@ impl GameState {
         region: &'static RegionProfile,
         selected_party: Option<&'static PartyProfile>,
     ) -> Self {
-        let mut game =
-            Self::from_election(campaign_year, side, baseline_election(2024), seed, style);
+        Self::new_local_with_party_and_parameters(
+            campaign_year,
+            side,
+            seed,
+            style,
+            region,
+            selected_party,
+            ModelParameters::default(),
+        )
+    }
+
+    pub fn new_local_with_party_and_parameters(
+        campaign_year: u16,
+        side: Side,
+        seed: u64,
+        style: CampaignStyle,
+        region: &'static RegionProfile,
+        selected_party: Option<&'static PartyProfile>,
+        model_parameters: ModelParameters,
+    ) -> Self {
+        let mut game = Self::from_election(
+            campaign_year,
+            side,
+            baseline_election(2024),
+            seed,
+            style,
+            model_parameters,
+        );
         game.baseline_year = 2022;
         game.region = Some(region);
         let (mut parties, shares) = local_slate(region);
@@ -627,6 +776,7 @@ impl GameState {
         election: &'static PresidentialElection,
         seed: u64,
         style: CampaignStyle,
+        model_parameters: ModelParameters,
     ) -> Self {
         let player_index = match side {
             Side::Incumbent => incumbent_candidate_index(election),
@@ -667,6 +817,7 @@ impl GameState {
             region: None,
             side,
             style,
+            model_parameters,
             player_attributes: style.attributes(),
             player_index,
             candidates,
@@ -754,13 +905,28 @@ impl GameState {
         let event_match = current_event
             .filter(|event| action.issues.contains(&event.issue))
             .is_some();
-        let issue_bonus = if event_match { 0.12 } else { 0.0 };
+        let issue_bonus = if event_match {
+            0.12 * self
+                .model_parameters
+                .multiplier(SensitivityParameter::EventBonus)
+        } else {
+            0.0
+        };
         let local_match = self
             .region
             .filter(|region| action.issues.contains(&region.focus))
-            .map(|_| 0.08)
+            .map(|_| {
+                0.08 * self
+                    .model_parameters
+                    .multiplier(SensitivityParameter::LocalFocusBonus)
+            })
             .unwrap_or(0.0);
-        let trust_bonus = ((self.trust - 50.0) * 0.004).clamp(-0.2, 0.2);
+        let trust_bonus = ((self.trust - 50.0)
+            * 0.004
+            * self
+                .model_parameters
+                .multiplier(SensitivityParameter::TrustModifier))
+        .clamp(-0.2, 0.2);
         let skill = match action.id {
             ActionId::PolicyDelivery | ActionId::CrisisResponse | ActionId::PolicyForum => {
                 self.player_attributes.policy
@@ -776,18 +942,29 @@ impl GameState {
             | ActionId::PollCoordination => self.player_attributes.communication,
         };
         let skill_bonus = ((skill - 50.0) * 0.006).clamp(-0.2, 0.2);
-        let fatigue_penalty = if self.stamina < 20.0 {
+        let base_fatigue_penalty = if self.stamina < 20.0 {
             -0.12
         } else if self.stamina < 45.0 {
             -0.06
         } else {
             0.0
         };
-        let jitter = self.rng.between(-0.07, 0.07);
+        let fatigue_penalty = base_fatigue_penalty
+            * self
+                .model_parameters
+                .multiplier(SensitivityParameter::FatiguePenalty);
+        let daily_noise = 0.07
+            * self
+                .model_parameters
+                .multiplier(SensitivityParameter::DailyNoise);
+        let jitter = self.rng.between(-daily_noise, daily_noise);
         let swing = if id == ActionId::RestAndPrepare {
             0.0
         } else {
             (action.base_swing
+                * self
+                    .model_parameters
+                    .multiplier(SensitivityParameter::ActionSwing)
                 + issue_bonus
                 + local_match
                 + trust_bonus
@@ -978,9 +1155,13 @@ impl GameState {
         // Mobilization changes the player's likely vote yield slightly rather
         // than merely appearing as a decorative meter (bounded at +/- 2 pts).
         let mobilization_effect = ((self.turnout_momentum - 50.0) * 0.04).clamp(-2.0, 2.0);
+        let terminal_noise = 4.0
+            * self
+                .model_parameters
+                .multiplier(SensitivityParameter::TerminalNoise);
         for sample in 0..samples {
             let mut ballot = self.polls.clone();
-            let late_swing = self.rng.between(-4.0, 4.0) + mobilization_effect;
+            let late_swing = self.rng.between(-terminal_noise, terminal_noise) + mobilization_effect;
             shift_share(&mut ballot, self.player_index, late_swing);
             if sample == 0 {
                 final_shares = ballot.clone();
@@ -1428,6 +1609,54 @@ mod tests {
         }
         assert_eq!(left.polls, right.polls);
         assert_eq!(left.finish().shares, right.finish().shares);
+    }
+
+    #[test]
+    fn explicit_default_model_parameters_preserve_the_existing_path() {
+        let mut baseline =
+            GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
+        let mut configured = GameState::new_with_style_and_parameters(
+            2024,
+            Side::Challenger,
+            42,
+            CampaignStyle::Policy,
+            ModelParameters::default(),
+        );
+        for action in [
+            ActionId::PolicyForum,
+            ActionId::LegalAssembly,
+            ActionId::CommunityTour,
+        ] {
+            baseline.apply_action(action).unwrap();
+            configured.apply_action(action).unwrap();
+        }
+        assert_eq!(baseline.polls, configured.polls);
+        assert_eq!(baseline.finish(), configured.finish());
+    }
+
+    #[test]
+    fn one_factor_multiplier_changes_only_the_selected_model_effect() {
+        let reduced_action_effect = ModelParameters::default()
+            .with_multiplier(SensitivityParameter::ActionSwing, 0.8)
+            .unwrap();
+        assert!(ModelParameters::default()
+            .with_multiplier(SensitivityParameter::ActionSwing, 3.1)
+            .is_err());
+        assert!(ModelParameters::default()
+            .with_multiplier(SensitivityParameter::DailyNoise, f64::NAN)
+            .is_err());
+
+        let mut baseline = GameState::new_with_style(2024, Side::Challenger, 73, CampaignStyle::Balanced);
+        let mut reduced = GameState::new_with_style_and_parameters(
+            2024,
+            Side::Challenger,
+            73,
+            CampaignStyle::Balanced,
+            reduced_action_effect,
+        );
+        baseline.apply_action(ActionId::PolicyForum).unwrap();
+        reduced.apply_action(ActionId::PolicyForum).unwrap();
+        assert_ne!(baseline.polls, reduced.polls);
     }
 
     #[test]

@@ -13,6 +13,7 @@ cargo run -- --year 2026 --region 臺北市 --role challenger --seed 7 --auto
 cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto
 cargo run -- --year 2026 --region 高雄市 --primary --seed 7
 cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
+cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sensitivity --batch-log sensitivity.tsv
 cargo run -- --regions
 cargo run -- --parties
 ```
@@ -44,8 +45,9 @@ cargo run -- --parties
 
 - `--batch N` 以起始 `--seed` 起算，連續執行 N 個固定 seed 的自動示範；需明確提供 `--role`。目前每種風格最多 10,000 場。
 - `--sweep-styles` 以相同 seed 範圍比較均衡、政策、組織、溝通四種能力風格，可用於策略敏感度探索；自動行動政策固定，因此結果只反映指定情境與示範策略，不代表人類玩家策略的普遍效果。
+- `--sensitivity` 做單因子模型參數測試：以相同 seed 對行動基礎效果、事件／地方加成、信任修正、疲勞懲罰、每日波動及終局誤差逐一測試 0.8× 與 1.2×；另有基準跑次作配對比較。此模式最多 1,000 個 seed，且不可和 `--sweep-styles` 同時使用。
 - `--batch-log runs.tsv` 會逐場追加 TSV 原始跑次，包含 seed、實際勝者、玩家終局支持與票差、模型內勝率、任務、資源及戰役操作軸。欄位不相容時會拒絕混寫；請為新版格式另指定檔名。
-- 摘要呈現各 seed 的實際勝出比例、模型內平均勝率、終局支持均值與 P10／P50／P90、平均票差和任務完成數。這些是遊戲模型結果，不是民調或選舉預測；多 seed 只檢查模型內行為，仍需另外校準真實參數。
+- 一般摘要呈現各 seed 的實際勝出比例、模型內平均勝率、終局支持均值與 P10／P50／P90、平均票差和任務完成數；敏感度摘要則呈現相對基準的配對終局支持與模型內勝率變化。這些是遊戲模型結果，不是民調或選舉預測；多 seed 只檢查模型內行為，仍需另外校準真實參數。
 
 ## 歷史資料範圍
 

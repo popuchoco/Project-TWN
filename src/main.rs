@@ -4,17 +4,19 @@ use project_twn::history::{
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState, Side,
-    CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+    actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
+    ModelParameters, SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
 use std::env;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility";
 const MAX_BATCH_RUNS: u32 = 10_000;
+const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
 
 struct Options {
     year: u16,
@@ -31,6 +33,7 @@ struct Options {
     log: Option<String>,
     batch: Option<u32>,
     sweep_styles: bool,
+    sensitivity: bool,
     batch_log: Option<String>,
 }
 
@@ -82,7 +85,15 @@ fn run() -> Result<(), String> {
         options.style
     };
     let (region, selected_party) = resolve_scenario(&options, role)?;
-    let mut game = new_scenario_game(&options, role, style, options.seed, region, selected_party);
+    let mut game = new_scenario_game(
+        &options,
+        role,
+        style,
+        options.seed,
+        region,
+        selected_party,
+        ModelParameters::default(),
+    );
     print_intro(&game, options.seed);
 
     if options.auto {
@@ -146,12 +157,25 @@ fn new_scenario_game(
     seed: u64,
     region: Option<&'static RegionProfile>,
     selected_party: Option<&'static PartyProfile>,
+    model_parameters: ModelParameters,
 ) -> GameState {
     match region {
-        Some(region) => {
-            GameState::new_local_with_party(options.year, role, seed, style, region, selected_party)
-        }
-        None => GameState::new_with_style(options.year, role, seed, style),
+        Some(region) => GameState::new_local_with_party_and_parameters(
+            options.year,
+            role,
+            seed,
+            style,
+            region,
+            selected_party,
+            model_parameters,
+        ),
+        None => GameState::new_with_style_and_parameters(
+            options.year,
+            role,
+            seed,
+            style,
+            model_parameters,
+        ),
     }
 }
 
@@ -172,6 +196,7 @@ fn parse_args() -> Result<Options, String> {
         log: None,
         batch: None,
         sweep_styles: false,
+        sensitivity: false,
         batch_log: None,
     };
     while let Some(arg) = args.next() {
@@ -214,6 +239,7 @@ fn parse_args() -> Result<Options, String> {
                 );
             }
             "--sweep-styles" => options.sweep_styles = true,
+            "--sensitivity" => options.sensitivity = true,
             "--batch-log" => {
                 options.batch_log = Some(
                     args.next()
@@ -265,6 +291,17 @@ fn parse_args() -> Result<Options, String> {
     }
     if options.sweep_styles && options.batch.is_none() {
         return Err("--sweep-styles 必須搭配 --batch 使用。".to_string());
+    }
+    if options.sensitivity && options.batch.is_none() {
+        return Err("--sensitivity 必須搭配 --batch 使用。".to_string());
+    }
+    if options.sensitivity && options.sweep_styles {
+        return Err("--sensitivity 與 --sweep-styles 是不同比較設計，請分開執行。".to_string());
+    }
+    if options.sensitivity && options.batch.is_some_and(|runs| runs > MAX_SENSITIVITY_SEEDS) {
+        return Err(format!(
+            "單因子敏感度每個參數最多使用 {MAX_SENSITIVITY_SEEDS} 個 seed。"
+        ));
     }
     if options.batch_log.is_some() && options.batch.is_none() {
         return Err("--batch-log 必須搭配 --batch 使用。".to_string());
@@ -541,6 +578,8 @@ fn run_auto(game: &mut GameState, show_progress: bool) {
 struct BatchRecord {
     style: CampaignStyle,
     seed: u64,
+    sensitivity_parameter: &'static str,
+    multiplier: f64,
     winner_candidate: String,
     winner_party: String,
     player_party: String,
@@ -555,6 +594,16 @@ struct BatchRecord {
     scorecard: CampaignScorecard,
 }
 
+#[derive(Clone, Debug)]
+struct BatchMetrics {
+    seed_win_rate: f64,
+    mean_model_probability: f64,
+    mean_final_share: f64,
+    mean_signed_margin: f64,
+    mean_objectives: f64,
+    shares: Vec<f64>,
+}
+
 fn run_batch(
     options: &Options,
     runs: u32,
@@ -562,6 +611,9 @@ fn run_batch(
     region: Option<&'static RegionProfile>,
     selected_party: Option<&'static PartyProfile>,
 ) -> Result<(), String> {
+    if options.sensitivity {
+        return run_sensitivity_batch(options, runs, role, region, selected_party);
+    }
     let last_seed = options
         .seed
         .checked_add(u64::from(runs - 1))
@@ -581,35 +633,17 @@ fn run_batch(
     for &style in &styles {
         for offset in 0..runs {
             let seed = options.seed + u64::from(offset);
-            let mut game = new_scenario_game(options, role, style, seed, region, selected_party);
-            run_auto(&mut game, false);
-            let result = game.finish();
-            let winner = &game.candidates[result.winner_index];
-            let player = &game.candidates[game.player_index];
-            let player_final_share = result.shares[game.player_index];
-            let strongest_opponent_share = result
-                .shares
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != game.player_index)
-                .map(|(_, share)| *share)
-                .fold(0.0, f64::max);
-            records.push(BatchRecord {
+            records.push(simulate_batch_record(
+                options,
+                role,
                 style,
                 seed,
-                winner_candidate: winner.name.clone(),
-                winner_party: winner.party.to_string(),
-                player_party: player.party.to_string(),
-                player_won: result.winner_index == game.player_index,
-                player_win_probability: result.player_win_probability,
-                player_final_share,
-                signed_margin: player_final_share - strongest_opponent_share,
-                objectives_completed: game.objectives_completed(),
-                budget_remaining: game.budget,
-                trust: game.trust,
-                mobilization: game.turnout_momentum,
-                scorecard: game.scorecard(),
-            });
+                region,
+                selected_party,
+                ModelParameters::default(),
+                "baseline",
+                1.0,
+            ));
         }
     }
 
@@ -629,45 +663,10 @@ fn run_batch(
     for style in &styles {
         let group: Vec<_> = records
             .iter()
-            .filter(|record| record.style == *style)
+            .filter(|record| record.style == *style && record.sensitivity_parameter == "baseline")
             .collect();
-        let count = group.len() as f64;
-        let wins = group.iter().filter(|record| record.player_won).count() as f64;
-        let mean_model_probability = group
-            .iter()
-            .map(|record| record.player_win_probability)
-            .sum::<f64>()
-            / count;
-        let mean_final_share = group
-            .iter()
-            .map(|record| record.player_final_share)
-            .sum::<f64>()
-            / count;
-        let mean_signed_margin =
-            group.iter().map(|record| record.signed_margin).sum::<f64>() / count;
-        let mean_objectives = group
-            .iter()
-            .map(|record| f64::from(record.objectives_completed))
-            .sum::<f64>()
-            / count;
-        let mut shares: Vec<_> = group
-            .iter()
-            .map(|record| record.player_final_share)
-            .collect();
-        shares.sort_by(f64::total_cmp);
-        println!(
-            "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜平均週任務 {:.1}/{}",
-            style.label(),
-            wins / count * 100.0,
-            mean_model_probability * 100.0,
-            mean_final_share,
-            percentile(&shares, 0.10),
-            percentile(&shares, 0.50),
-            percentile(&shares, 0.90),
-            mean_signed_margin,
-            mean_objectives,
-            CAMPAIGN_ROUNDS
-        );
+        let metrics = batch_metrics(&group);
+        print_batch_metrics(style.label(), &metrics);
     }
     println!("結果僅描述固定自動策略下的遊戲模型跑次，不是民調或選舉預測。");
 
@@ -676,6 +675,222 @@ fn run_batch(
         println!("逐場原始結果已追加至：{path}");
     }
     Ok(())
+}
+
+fn simulate_batch_record(
+    options: &Options,
+    role: Side,
+    style: CampaignStyle,
+    seed: u64,
+    region: Option<&'static RegionProfile>,
+    selected_party: Option<&'static PartyProfile>,
+    model_parameters: ModelParameters,
+    sensitivity_parameter: &'static str,
+    multiplier: f64,
+) -> BatchRecord {
+    let mut game = new_scenario_game(
+        options,
+        role,
+        style,
+        seed,
+        region,
+        selected_party,
+        model_parameters,
+    );
+    run_auto(&mut game, false);
+    let result = game.finish();
+    let winner = &game.candidates[result.winner_index];
+    let player = &game.candidates[game.player_index];
+    let player_final_share = result.shares[game.player_index];
+    let strongest_opponent_share = result
+        .shares
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != game.player_index)
+        .map(|(_, share)| *share)
+        .fold(0.0, f64::max);
+    BatchRecord {
+        style,
+        seed,
+        sensitivity_parameter,
+        multiplier,
+        winner_candidate: winner.name.clone(),
+        winner_party: winner.party.to_string(),
+        player_party: player.party.to_string(),
+        player_won: result.winner_index == game.player_index,
+        player_win_probability: result.player_win_probability,
+        player_final_share,
+        signed_margin: player_final_share - strongest_opponent_share,
+        objectives_completed: game.objectives_completed(),
+        budget_remaining: game.budget,
+        trust: game.trust,
+        mobilization: game.turnout_momentum,
+        scorecard: game.scorecard(),
+    }
+}
+
+fn run_sensitivity_batch(
+    options: &Options,
+    runs: u32,
+    role: Side,
+    region: Option<&'static RegionProfile>,
+    selected_party: Option<&'static PartyProfile>,
+) -> Result<(), String> {
+    let last_seed = options
+        .seed
+        .checked_add(u64::from(runs - 1))
+        .ok_or_else(|| "seed 範圍超出 u64 上限。".to_string())?;
+    let mut records = Vec::with_capacity(runs as usize * (1 + SensitivityParameter::ALL.len() * 2));
+    for offset in 0..runs {
+        let seed = options.seed + u64::from(offset);
+        records.push(simulate_batch_record(
+            options,
+            role,
+            options.style,
+            seed,
+            region,
+            selected_party,
+            ModelParameters::default(),
+            "baseline",
+            1.0,
+        ));
+    }
+    for parameter in SensitivityParameter::ALL {
+        for multiplier in [0.8, 1.2] {
+            let model_parameters = ModelParameters::default()
+                .with_multiplier(parameter, multiplier)
+                .map_err(str::to_string)?;
+            for offset in 0..runs {
+                let seed = options.seed + u64::from(offset);
+                records.push(simulate_batch_record(
+                    options,
+                    role,
+                    options.style,
+                    seed,
+                    region,
+                    selected_party,
+                    model_parameters,
+                    parameter.key(),
+                    multiplier,
+                ));
+            }
+        }
+    }
+
+    println!("=== 模型參數單因子敏感度（±20%）===");
+    println!(
+        "情境：{} 年、{}、{}、{}；配對 seed：{}–{}；每項比較 {} 場。",
+        options.year,
+        role.label(),
+        region.map(|value| value.name).unwrap_or("總統全國情境"),
+        options.style.label(),
+        options.seed,
+        last_seed,
+        runs
+    );
+    if let Some(party) = selected_party {
+        println!("玩家政黨情境：{}。", party.name);
+    }
+    let baseline: Vec<_> = records
+        .iter()
+        .filter(|record| record.sensitivity_parameter == "baseline")
+        .collect();
+    let baseline_metrics = batch_metrics(&baseline);
+    print_batch_metrics("基準參數", &baseline_metrics);
+    let baseline_by_seed: HashMap<_, _> = baseline.iter().map(|record| (record.seed, *record)).collect();
+    for parameter in SensitivityParameter::ALL {
+        for multiplier in [0.8, 1.2] {
+            let group: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record.sensitivity_parameter == parameter.key()
+                        && (record.multiplier - multiplier).abs() < f64::EPSILON
+                })
+                .collect();
+            let metrics = batch_metrics(&group);
+            let paired_share_delta = group
+                .iter()
+                .map(|record| {
+                    record.player_final_share
+                        - baseline_by_seed[&record.seed].player_final_share
+                })
+                .sum::<f64>()
+                / group.len() as f64;
+            let paired_probability_delta = group
+                .iter()
+                .map(|record| {
+                    record.player_win_probability
+                        - baseline_by_seed[&record.seed].player_win_probability
+                })
+                .sum::<f64>()
+                / group.len() as f64;
+            println!(
+                "{} × {:.1}：終局支持配對變化 {:+.2} 個百分點｜模型內勝率配對變化 {:+.2} 個百分點｜seed 勝出率 {:.1}%｜平均票差 {:+.2}",
+                parameter.label(),
+                multiplier,
+                paired_share_delta,
+                paired_probability_delta * 100.0,
+                metrics.seed_win_rate * 100.0,
+                metrics.mean_signed_margin
+            );
+        }
+    }
+    println!("僅單次調整一個遊戲參數；這是模型內方向性檢查，不代表參數已由選舉資料校準。");
+
+    if let Some(path) = options.batch_log.as_deref() {
+        save_batch_log(path, options, role, region, &records)?;
+        println!("逐場原始結果已追加至：{path}");
+    }
+    Ok(())
+}
+
+fn batch_metrics(group: &[&BatchRecord]) -> BatchMetrics {
+    let count = group.len() as f64;
+    let mut shares: Vec<_> = group
+        .iter()
+        .map(|record| record.player_final_share)
+        .collect();
+    shares.sort_by(f64::total_cmp);
+    BatchMetrics {
+        seed_win_rate: group.iter().filter(|record| record.player_won).count() as f64 / count,
+        mean_model_probability: group
+            .iter()
+            .map(|record| record.player_win_probability)
+            .sum::<f64>()
+            / count,
+        mean_final_share: group
+            .iter()
+            .map(|record| record.player_final_share)
+            .sum::<f64>()
+            / count,
+        mean_signed_margin: group
+            .iter()
+            .map(|record| record.signed_margin)
+            .sum::<f64>()
+            / count,
+        mean_objectives: group
+            .iter()
+            .map(|record| f64::from(record.objectives_completed))
+            .sum::<f64>()
+            / count,
+        shares,
+    }
+}
+
+fn print_batch_metrics(label: &str, metrics: &BatchMetrics) {
+    println!(
+        "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜平均週任務 {:.1}/{}",
+        label,
+        metrics.seed_win_rate * 100.0,
+        metrics.mean_model_probability * 100.0,
+        metrics.mean_final_share,
+        percentile(&metrics.shares, 0.10),
+        percentile(&metrics.shares, 0.50),
+        percentile(&metrics.shares, 0.90),
+        metrics.mean_signed_margin,
+        metrics.mean_objectives,
+        CAMPAIGN_ROUNDS
+    );
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -729,13 +944,15 @@ fn save_batch_log(
         let review = record.scorecard;
         writeln!(
             file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
             options.year,
             mode,
             tsv_cell(region_name),
             role.label(),
             record.style.label(),
             record.seed,
+            record.sensitivity_parameter,
+            record.multiplier,
             tsv_cell(&record.winner_candidate),
             tsv_cell(&record.winner_party),
             tsv_cell(&record.player_party),
@@ -1071,18 +1288,19 @@ fn print_usage() {
   project-twn --parties
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--primary] [--seed 整數] [--auto] [--log 檔案.tsv]
-  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--sweep-styles]
+  project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--sweep-styles | --sensitivity]
       [--year 年份] [--region 縣市] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
 
 範例：
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
   cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
+  cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sensitivity --batch-log sensitivity.tsv
 
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 省略單場模式的 --role 會詢問陣營；--auto 以固定示範策略跑完。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
-批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格。批次數值是遊戲情境結果，不是民調或選舉預測。"
+批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
     );
 }
 
