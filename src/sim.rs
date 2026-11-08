@@ -278,6 +278,108 @@ pub enum ActionId {
 
 impl ActionId {
     pub const COUNT: usize = 30;
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::PolicyDelivery,
+        Self::CrisisResponse,
+        Self::TransparencyReport,
+        Self::PublicServices,
+        Self::CommunityTour,
+        Self::PolicyForum,
+        Self::LegalAssembly,
+        Self::CoalitionTalks,
+        Self::OversightPetition,
+        Self::PublicMessage,
+        Self::RestAndPrepare,
+        Self::PollCoordination,
+        Self::CampaignHeadquarters,
+        Self::VolunteerCanvassing,
+        Self::GroundTeamLeaflets,
+        Self::StreetSweep,
+        Self::TurnoutMobilization,
+        Self::Debate,
+        Self::MediaInterview,
+        Self::PolicyPresentation,
+        Self::FactCheckResponse,
+        Self::FabricatedPoll,
+        Self::AnonymousSmear,
+        Self::CoordinatedOpinionWar,
+        Self::SupportersAssociation,
+        Self::ReligiousCommunityVisit,
+        Self::PilgrimageParticipation,
+        Self::MassAttendance,
+        Self::VulnerableCommunityCare,
+        Self::DisasterResponseVisit,
+    ];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::PolicyDelivery => 0,
+            Self::CrisisResponse => 1,
+            Self::TransparencyReport => 2,
+            Self::PublicServices => 3,
+            Self::CommunityTour => 4,
+            Self::PolicyForum => 5,
+            Self::LegalAssembly => 6,
+            Self::CoalitionTalks => 7,
+            Self::OversightPetition => 8,
+            Self::PublicMessage => 9,
+            Self::RestAndPrepare => 10,
+            Self::PollCoordination => 11,
+            Self::CampaignHeadquarters => 12,
+            Self::VolunteerCanvassing => 13,
+            Self::GroundTeamLeaflets => 14,
+            Self::StreetSweep => 15,
+            Self::TurnoutMobilization => 16,
+            Self::Debate => 17,
+            Self::MediaInterview => 18,
+            Self::PolicyPresentation => 19,
+            Self::FactCheckResponse => 20,
+            Self::FabricatedPoll => 21,
+            Self::AnonymousSmear => 22,
+            Self::CoordinatedOpinionWar => 23,
+            Self::SupportersAssociation => 24,
+            Self::ReligiousCommunityVisit => 25,
+            Self::PilgrimageParticipation => 26,
+            Self::MassAttendance => 27,
+            Self::VulnerableCommunityCare => 28,
+            Self::DisasterResponseVisit => 29,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::PolicyDelivery => "policy_delivery",
+            Self::CrisisResponse => "crisis_response",
+            Self::TransparencyReport => "transparency_report",
+            Self::PublicServices => "public_services",
+            Self::CommunityTour => "community_tour",
+            Self::PolicyForum => "policy_forum",
+            Self::LegalAssembly => "legal_assembly",
+            Self::CoalitionTalks => "coalition_talks",
+            Self::OversightPetition => "oversight_petition",
+            Self::PublicMessage => "public_message",
+            Self::RestAndPrepare => "rest_and_prepare",
+            Self::PollCoordination => "poll_coordination",
+            Self::CampaignHeadquarters => "campaign_headquarters",
+            Self::VolunteerCanvassing => "volunteer_canvassing",
+            Self::GroundTeamLeaflets => "ground_team_leaflets",
+            Self::StreetSweep => "street_sweep",
+            Self::TurnoutMobilization => "turnout_mobilization",
+            Self::Debate => "debate",
+            Self::MediaInterview => "media_interview",
+            Self::PolicyPresentation => "policy_presentation",
+            Self::FactCheckResponse => "fact_check_response",
+            Self::FabricatedPoll => "fabricated_poll",
+            Self::AnonymousSmear => "anonymous_smear",
+            Self::CoordinatedOpinionWar => "coordinated_opinion_war",
+            Self::SupportersAssociation => "supporters_association",
+            Self::ReligiousCommunityVisit => "religious_community_visit",
+            Self::PilgrimageParticipation => "pilgrimage_participation",
+            Self::MassAttendance => "mass_attendance",
+            Self::VulnerableCommunityCare => "vulnerable_community_care",
+            Self::DisasterResponseVisit => "disaster_response_visit",
+        }
+    }
 
     pub fn category(self) -> TacticCategory {
         match self {
@@ -2171,38 +2273,7 @@ fn is_valid_share_vector(shares: &[f64]) -> bool {
 }
 
 fn action_index(id: ActionId) -> usize {
-    match id {
-        ActionId::PolicyDelivery => 0,
-        ActionId::CrisisResponse => 1,
-        ActionId::TransparencyReport => 2,
-        ActionId::PublicServices => 3,
-        ActionId::CommunityTour => 4,
-        ActionId::PolicyForum => 5,
-        ActionId::LegalAssembly => 6,
-        ActionId::CoalitionTalks => 7,
-        ActionId::OversightPetition => 8,
-        ActionId::PublicMessage => 9,
-        ActionId::RestAndPrepare => 10,
-        ActionId::PollCoordination => 11,
-        ActionId::CampaignHeadquarters => 12,
-        ActionId::VolunteerCanvassing => 13,
-        ActionId::GroundTeamLeaflets => 14,
-        ActionId::StreetSweep => 15,
-        ActionId::TurnoutMobilization => 16,
-        ActionId::Debate => 17,
-        ActionId::MediaInterview => 18,
-        ActionId::PolicyPresentation => 19,
-        ActionId::FactCheckResponse => 20,
-        ActionId::FabricatedPoll => 21,
-        ActionId::AnonymousSmear => 22,
-        ActionId::CoordinatedOpinionWar => 23,
-        ActionId::SupportersAssociation => 24,
-        ActionId::ReligiousCommunityVisit => 25,
-        ActionId::PilgrimageParticipation => 26,
-        ActionId::MassAttendance => 27,
-        ActionId::VulnerableCommunityCare => 28,
-        ActionId::DisasterResponseVisit => 29,
-    }
+    id.index()
 }
 
 fn is_field_action(id: ActionId) -> bool {
@@ -2324,6 +2395,16 @@ mod tests {
         assert!(game.polls.iter().all(|share| *share >= 0.0));
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
         assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn action_ids_have_stable_indexes_and_unique_batch_keys() {
+        let mut keys = std::collections::HashSet::new();
+        for (index, id) in ActionId::ALL.iter().copied().enumerate() {
+            assert_eq!(id.index(), index);
+            assert!(keys.insert(id.key()));
+        }
+        assert_eq!(ActionId::ALL.len(), ActionId::COUNT);
     }
 
     #[test]

@@ -93,7 +93,33 @@ pub enum StrategyAxis {
 }
 
 impl StrategyAxis {
-    fn index(self) -> usize {
+    pub const ALL: [Self; 8] = [
+        Self::Support,
+        Self::Context,
+        Self::Trust,
+        Self::Mobilization,
+        Self::Objective,
+        Self::Sustainability,
+        Self::Integrity,
+        Self::Infrastructure,
+    ];
+
+    pub const COUNT: usize = Self::ALL.len();
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Support => "支持度",
+            Self::Context => "議題脈絡",
+            Self::Trust => "信任",
+            Self::Mobilization => "動員",
+            Self::Objective => "週任務",
+            Self::Sustainability => "資源續航",
+            Self::Integrity => "誠信風險",
+            Self::Infrastructure => "組織基礎",
+        }
+    }
+
+    pub fn index(self) -> usize {
         match self {
             Self::Support => 0,
             Self::Context => 1,
@@ -118,6 +144,8 @@ pub trait StrategyModule {
 pub struct StrategyRecommendation {
     pub preview: ActionPreview,
     pub score: f64,
+    /// Weighted score components in `StrategyAxis::ALL` order; these sum to `score`.
+    pub module_contributions: [f64; StrategyAxis::COUNT],
     pub rationales: Vec<&'static str>,
 }
 
@@ -158,9 +186,13 @@ impl StrategyEngine {
             .filter_map(|action| {
                 let preview = game.preview_action(action.id).ok()?;
                 let mut score = 0.0;
+                let mut module_contributions = [0.0; StrategyAxis::COUNT];
                 let mut rationales = Vec::new();
                 for module in &self.modules {
-                    score += module.score(game, &preview) * self.profile.weight(module.axis());
+                    let axis = module.axis();
+                    let contribution = module.score(game, &preview) * self.profile.weight(axis);
+                    score += contribution;
+                    module_contributions[axis.index()] += contribution;
                     if let Some(rationale) = module.rationale(game, &preview) {
                         if !rationales.contains(&rationale) {
                             rationales.push(rationale);
@@ -170,6 +202,7 @@ impl StrategyEngine {
                 Some(StrategyRecommendation {
                     preview,
                     score,
+                    module_contributions,
                     rationales,
                 })
             })
@@ -393,6 +426,10 @@ mod tests {
         assert!(recommendations
             .windows(2)
             .all(|pair| pair[0].score >= pair[1].score));
+        assert!(recommendations.iter().all(|recommendation| {
+            let contributions = recommendation.module_contributions.iter().sum::<f64>();
+            (contributions - recommendation.score).abs() < 0.000_001
+        }));
         assert_eq!(game.polls, before_polls);
         assert_eq!(game.budget, before_budget);
     }

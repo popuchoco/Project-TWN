@@ -40,7 +40,7 @@ jobs:
           $rows = @(Get-Content target/ci-batch-runs.tsv)
           if ($rows.Count -ne 9) { throw "Expected a header and 8 style/seed rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 28) { throw "Unexpected batch TSV column count." }
+            if ($row.Split("`t").Count -ne 41) { throw "Unexpected batch TSV column count." }
           }
 
       - name: Smoke-test paired parameter sensitivity
@@ -49,7 +49,7 @@ jobs:
           $rows = @(Get-Content target/ci-sensitivity-runs.tsv)
           if ($rows.Count -ne 31) { throw "Expected a header and 30 one-factor rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 28) { throw "Unexpected sensitivity TSV column count." }
+            if ($row.Split("`t").Count -ne 41) { throw "Unexpected sensitivity TSV column count." }
           }
 
       - name: Smoke-test paired parameter interaction sensitivity
@@ -58,7 +58,7 @@ jobs:
           $rows = @(Get-Content target/ci-interaction-runs.tsv)
           if ($rows.Count -ne 85) { throw "Expected a header and 84 two-factor corner rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 28) { throw "Unexpected interaction TSV column count." }
+            if ($row.Split("`t").Count -ne 41) { throw "Unexpected interaction TSV column count." }
           }
 
       - name: Smoke-test strategy profile comparison
@@ -67,7 +67,26 @@ jobs:
           $rows = @(Get-Content target/ci-strategy-runs.tsv)
           if ($rows.Count -ne 8) { throw "Expected a header and 7 strategy rows; got $($rows.Count)." }
           foreach ($row in $rows) {
-            if ($row.Split("`t").Count -ne 28) { throw "Unexpected strategy TSV column count." }
+            if ($row.Split("`t").Count -ne 41) { throw "Unexpected strategy TSV column count." }
+          }
+          $headers = $rows[0].Split("`t")
+          $positiveIndex = [Array]::IndexOf($headers, "positive_actions")
+          $neutralIndex = [Array]::IndexOf($headers, "neutral_actions")
+          $negativeIndex = [Array]::IndexOf($headers, "negative_actions")
+          $compositionIndex = [Array]::IndexOf($headers, "action_composition")
+          if ($positiveIndex -lt 0 -or $neutralIndex -lt 0 -or $negativeIndex -lt 0 -or $compositionIndex -lt 0) { throw "Strategy TSV omitted action composition." }
+          $moduleColumns = @($headers | Where-Object { $_ -like "module_*_mean" })
+          if ($moduleColumns.Count -ne 8) { throw "Expected eight strategy contribution columns; got $($moduleColumns.Count)." }
+          foreach ($row in $rows | Select-Object -Skip 1) {
+            $values = $row.Split("`t")
+            $actionTotal = [int]$values[$positiveIndex] + [int]$values[$neutralIndex] + [int]$values[$negativeIndex]
+            if ($actionTotal -ne 84) { throw "Action composition should account for all 84 campaign days." }
+            $detailedTotal = 0
+            foreach ($entry in $values[$compositionIndex].Split(";")) {
+              $entryParts = $entry.Split("=")
+              $detailedTotal += [int]$entryParts[1]
+            }
+            if ($detailedTotal -ne 84) { throw "Per-action composition should account for all 84 campaign days." }
           }
           $strategies = @($rows | Select-Object -Skip 1 | ForEach-Object { $_.Split("`t")[5] } | Sort-Object -Unique)
           if ($strategies.Count -ne 7) { throw "Expected seven distinct strategy profiles; got $($strategies.Count)." }

@@ -4,10 +4,12 @@ use project_twn::history::{
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::sim::{
-    campaign_actions_for, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
-    ModelParameters, SensitivityParameter, Side, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
+    campaign_actions_for, ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameState,
+    ModelParameters, SensitivityParameter, Side, TacticCategory, CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
-use project_twn::strategy::{StrategyEngine, StrategyProfile};
+use project_twn::strategy::{
+    StrategyAxis, StrategyEngine, StrategyProfile, StrategyRecommendation,
+};
 use std::collections::HashMap;
 use std::env;
 use std::fs::OpenOptions;
@@ -15,7 +17,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds";
-const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2";
+const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition";
 const MAX_BATCH_RUNS: u32 = 10_000;
 const MAX_STRATEGY_SWEEP_RUNS: u32 = 1_000;
 const MAX_SENSITIVITY_SEEDS: u32 = 1_000;
@@ -628,8 +630,49 @@ fn run_interactive(game: &mut GameState, strategy: StrategyProfile) -> Result<()
     Ok(())
 }
 
-fn run_auto(game: &mut GameState, show_progress: bool, strategy: StrategyProfile) {
+#[derive(Clone, Copy, Default)]
+struct AutoRunSummary {
+    actions_taken: u16,
+    action_counts: [u16; 3],
+    action_usage_counts: [u16; ActionId::COUNT],
+    module_contribution_totals: [f64; StrategyAxis::COUNT],
+}
+
+impl AutoRunSummary {
+    fn record(&mut self, recommendation: &StrategyRecommendation) {
+        self.actions_taken += 1;
+        let category_index = match recommendation.preview.category {
+            TacticCategory::Positive => 0,
+            TacticCategory::Neutral => 1,
+            TacticCategory::Negative => 2,
+        };
+        self.action_counts[category_index] += 1;
+        self.action_usage_counts[recommendation.preview.id.index()] += 1;
+        for (total, contribution) in self
+            .module_contribution_totals
+            .iter_mut()
+            .zip(recommendation.module_contributions)
+        {
+            *total += contribution;
+        }
+    }
+
+    fn mean_module_contributions(self) -> [f64; StrategyAxis::COUNT] {
+        if self.actions_taken == 0 {
+            return [0.0; StrategyAxis::COUNT];
+        }
+        self.module_contribution_totals
+            .map(|total| total / f64::from(self.actions_taken))
+    }
+}
+
+fn run_auto(
+    game: &mut GameState,
+    show_progress: bool,
+    strategy: StrategyProfile,
+) -> AutoRunSummary {
     let engine = StrategyEngine::new(strategy);
+    let mut summary = AutoRunSummary::default();
     while !game.is_finished() {
         let Some(recommendation) = engine.rank_actions(game).into_iter().next() else {
             break;
@@ -637,10 +680,12 @@ fn run_auto(game: &mut GameState, show_progress: bool, strategy: StrategyProfile
         let Ok(outcome) = game.apply_action(recommendation.preview.id) else {
             break;
         };
+        summary.record(&recommendation);
         if show_progress {
             print_action_outcome(game, &outcome);
         }
     }
+    summary
 }
 
 #[derive(Clone, Debug)]
@@ -661,8 +706,12 @@ struct BatchRecord {
     signed_margin: f64,
     objectives_completed: u8,
     budget_remaining: i32,
+    stamina_remaining: f64,
     exposed_tactics: u8,
     sanctioned_funds: i32,
+    action_counts: [u16; 3],
+    action_usage_counts: [u16; ActionId::COUNT],
+    module_contribution_means: [f64; StrategyAxis::COUNT],
     trust: f64,
     mobilization: f64,
     scorecard: CampaignScorecard,
@@ -685,6 +734,10 @@ struct BatchMetrics {
     mean_objectives: f64,
     mean_exposed_tactics: f64,
     mean_sanctioned_funds: f64,
+    mean_budget_remaining: f64,
+    mean_stamina_remaining: f64,
+    mean_action_counts: [f64; 3],
+    mean_module_contributions: [f64; StrategyAxis::COUNT],
     shares: Vec<f64>,
 }
 
@@ -798,7 +851,7 @@ fn simulate_batch_record(
     strategy: StrategyProfile,
 ) -> BatchRecord {
     let mut game = new_scenario_game(scenario, seed, model_parameters);
-    run_auto(&mut game, false, strategy);
+    let auto_summary = run_auto(&mut game, false, strategy);
     let result = game.finish();
     let winner = &game.candidates[result.winner_index];
     let player = &game.candidates[game.player_index];
@@ -827,8 +880,12 @@ fn simulate_batch_record(
         signed_margin: player_final_share - strongest_opponent_share,
         objectives_completed: game.objectives_completed(),
         budget_remaining: game.budget,
+        stamina_remaining: game.stamina,
         exposed_tactics: game.exposed_tactics,
         sanctioned_funds: game.sanctioned_funds,
+        action_counts: auto_summary.action_counts,
+        action_usage_counts: auto_summary.action_usage_counts,
+        module_contribution_means: auto_summary.mean_module_contributions(),
         trust: game.trust,
         mobilization: game.turnout_momentum,
         scorecard: game.scorecard(),
@@ -1149,13 +1206,37 @@ fn batch_metrics(group: &[&BatchRecord]) -> BatchMetrics {
             .map(|record| f64::from(record.sanctioned_funds))
             .sum::<f64>()
             / count,
+        mean_budget_remaining: group
+            .iter()
+            .map(|record| f64::from(record.budget_remaining))
+            .sum::<f64>()
+            / count,
+        mean_stamina_remaining: group
+            .iter()
+            .map(|record| record.stamina_remaining)
+            .sum::<f64>()
+            / count,
+        mean_action_counts: std::array::from_fn(|index| {
+            group
+                .iter()
+                .map(|record| f64::from(record.action_counts[index]))
+                .sum::<f64>()
+                / count
+        }),
+        mean_module_contributions: std::array::from_fn(|index| {
+            group
+                .iter()
+                .map(|record| record.module_contribution_means[index])
+                .sum::<f64>()
+                / count
+        }),
         shares,
     }
 }
 
 fn print_batch_metrics(label: &str, metrics: &BatchMetrics) {
     println!(
-        "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜平均週任務 {:.1}/{}｜揭露操作 {:.2} 次／平均懲處資源 {:.2}",
+        "{}：seed 勝出率 {:.1}%｜模型內平均勝率 {:.1}%｜終局支持均值 {:.1}%（P10/P50/P90 {:.1}/{:.1}/{:.1}）｜平均票差 {:+.1}｜週任務 {:.1}/{}｜揭露 {:.2} 次／平均懲處 {:.2}｜剩餘預算 {:.1}／體力 {:.1}",
         label,
         metrics.seed_win_rate * 100.0,
         metrics.mean_model_probability * 100.0,
@@ -1167,7 +1248,21 @@ fn print_batch_metrics(label: &str, metrics: &BatchMetrics) {
         metrics.mean_objectives,
         CAMPAIGN_ROUNDS,
         metrics.mean_exposed_tactics,
-        metrics.mean_sanctioned_funds
+        metrics.mean_sanctioned_funds,
+        metrics.mean_budget_remaining,
+        metrics.mean_stamina_remaining
+    );
+    println!(
+        "  每場行動構成：正面 {:.1}／中立 {:.1}／負面 {:.1}；八軸平均加權貢獻：{}",
+        metrics.mean_action_counts[0],
+        metrics.mean_action_counts[1],
+        metrics.mean_action_counts[2],
+        StrategyAxis::ALL
+            .iter()
+            .zip(metrics.mean_module_contributions)
+            .map(|(axis, contribution)| format!("{} {:+.2}", axis.label(), contribution))
+            .collect::<Vec<_>>()
+            .join("、")
     );
 }
 
@@ -1220,39 +1315,53 @@ fn save_batch_log(
     let region_name = region.map(|value| value.name).unwrap_or("-");
     for record in records {
         let review = record.scorecard;
-        writeln!(
-            file,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{:.2}",
-            options.year,
-            mode,
+        let mut cells = vec![
+            options.year.to_string(),
+            mode.to_string(),
             tsv_cell(region_name),
-            role.label(),
-            record.style.label(),
-            record.strategy.key(),
-            record.seed,
-            record.sensitivity_parameter,
-            record.multiplier,
+            role.label().to_string(),
+            record.style.label().to_string(),
+            record.strategy.key().to_string(),
+            record.seed.to_string(),
+            record.sensitivity_parameter.to_string(),
+            format!("{:.2}", record.multiplier),
             tsv_cell(&record.winner_candidate),
             tsv_cell(&record.winner_party),
             tsv_cell(&record.player_party),
-            record.player_won,
-            record.player_win_probability,
-            record.player_final_share,
-            record.signed_margin,
-            record.objectives_completed,
-            record.budget_remaining,
-            record.trust,
-            record.mobilization,
-            review.policy,
-            review.event_response,
-            review.resource_management,
-            review.versatility,
-            record.exposed_tactics,
-            record.sanctioned_funds,
-            record.sensitivity_parameter_2,
-            record.multiplier_2
-        )
-        .map_err(|error| error.to_string())?;
+            record.player_won.to_string(),
+            format!("{:.4}", record.player_win_probability),
+            format!("{:.2}", record.player_final_share),
+            format!("{:.2}", record.signed_margin),
+            record.objectives_completed.to_string(),
+            record.budget_remaining.to_string(),
+            format!("{:.2}", record.stamina_remaining),
+            format!("{:.2}", record.trust),
+            format!("{:.2}", record.mobilization),
+            format!("{:.2}", review.policy),
+            format!("{:.2}", review.event_response),
+            format!("{:.2}", review.resource_management),
+            format!("{:.2}", review.versatility),
+            record.exposed_tactics.to_string(),
+            record.sanctioned_funds.to_string(),
+            record.sensitivity_parameter_2.to_string(),
+            format!("{:.2}", record.multiplier_2),
+        ];
+        cells.extend(record.action_counts.iter().map(u16::to_string));
+        cells.extend(
+            StrategyAxis::ALL
+                .iter()
+                .zip(record.module_contribution_means)
+                .map(|(_, contribution)| format!("{contribution:.4}")),
+        );
+        let action_composition = ActionId::ALL
+            .iter()
+            .zip(record.action_usage_counts)
+            .filter(|(_, count)| *count > 0)
+            .map(|(action, count)| format!("{}={count}", action.key()))
+            .collect::<Vec<_>>()
+            .join(";");
+        cells.push(action_composition);
+        writeln!(file, "{}", cells.join("\t")).map_err(|error| error.to_string())?;
     }
     file.flush().map_err(|error| error.to_string())?;
     Ok(())
@@ -1602,7 +1711,7 @@ fn print_usage() {
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。
 --strategy 選擇七種權重組合，互動模式顯示行動分類、排序及預估揭露風險，--auto 依排序採取行動。
 策略分數是遊戲啟發式，支持度是模型一步期望值；執行後另外顯示含 seed 波動與對手反應的實際變化，兩者都不是民調或選舉預測。
-批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sweep-strategies 以同一 seed 比較七種策略模組組合（最多 1,000 個 seed），並回報平均揭露次數與懲處資源；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。批次數值是遊戲情境結果，不是民調或選舉預測。"
+批次最多 10,000 個 seed；--sweep-styles 會以同一 seed 範圍比較四種能力風格；--sweep-strategies 以同一 seed 比較七種策略模組組合（最多 1,000 個 seed），並回報揭露／懲處、剩餘預算、行動構成與八軸平均加權貢獻；--sensitivity 以配對 seed 對單一模型參數做 ±20% 測試（最多 1,000 個 seed）；--interaction-sensitivity 以 2×2 配對檢查兩項參數的交互作用（每個 seed 84 場，最多 100 個 seed）。策略貢獻是排序分數分解；批次數值是遊戲情境結果，不是民調或選舉預測。"
     );
 }
 
@@ -1641,8 +1750,20 @@ mod tests {
         let mut left = GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
         let mut right =
             GameState::new_with_style(2024, Side::Challenger, 42, CampaignStyle::Policy);
-        run_auto(&mut left, false, StrategyProfile::Balanced);
-        run_auto(&mut right, false, StrategyProfile::Balanced);
+        let left_summary = run_auto(&mut left, false, StrategyProfile::Balanced);
+        let right_summary = run_auto(&mut right, false, StrategyProfile::Balanced);
+        assert_eq!(left_summary.action_counts, right_summary.action_counts);
+        assert_eq!(
+            left_summary.action_usage_counts,
+            right_summary.action_usage_counts
+        );
+        assert_eq!(left_summary.actions_taken, 84);
+        assert_eq!(left_summary.action_counts.iter().sum::<u16>(), 84);
+        assert_eq!(left_summary.action_usage_counts.iter().sum::<u16>(), 84);
+        assert!(left_summary
+            .mean_module_contributions()
+            .iter()
+            .all(|contribution| contribution.is_finite()));
         assert_eq!(left.polls, right.polls);
         assert_eq!(left.finish(), right.finish());
         assert_eq!(left.objectives_completed(), right.objectives_completed());
