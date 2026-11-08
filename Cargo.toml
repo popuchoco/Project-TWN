@@ -3,7 +3,7 @@ name = "project-twn"
 version = "0.1.0"
 edition = "2021"
 description = "臺灣選戰模擬器：歷史資料與互動式競選沙盒"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [lib]
 name = "project_twn"

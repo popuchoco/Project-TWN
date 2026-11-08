@@ -52,3 +52,7 @@ cargo run -- --year 2026 --region 臺北市 --role challenger --seed 42 --auto
 ```
 
 資料型別與歷史資料在 `src/history.rs`；行動、民調更新、動員效果與結算模型在 `src/sim.rs`；命令列互動在 `src/main.rs`。來源與設計假設在 `docs/`。
+
+## 授權
+
+本專案採用 **GNU General Public License v3.0 only（GPL-3.0-only）**；授權全文見 [`LICENSE`](LICENSE)。
