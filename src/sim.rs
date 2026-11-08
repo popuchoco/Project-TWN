@@ -1054,8 +1054,10 @@ pub struct GameState {
 
 #[derive(Clone, Debug)]
 pub struct ActionOutcome {
+    pub id: ActionId,
     pub action_name: &'static str,
     pub category: TacticCategory,
+    pub rival_response: Option<RivalResponse>,
     pub event_title: Option<&'static str>,
     pub share_before: f64,
     pub share_after: f64,
@@ -1081,6 +1083,13 @@ pub struct ActionOutcome {
     pub objective_reward: i32,
     pub week: u8,
     pub day: u8,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RivalResponse {
+    pub candidate_name: String,
+    pub share_before: f64,
+    pub share_after: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -1987,13 +1996,22 @@ impl GameState {
         };
 
         // A competing campaign responds to daily activity with a small seeded
-        // movement; this is a model parameter, not a historical vote estimate.
-        if id != ActionId::RestAndPrepare {
-            if let Some(rival_index) = self.strongest_rival() {
-                let counter_swing = self.rng.between(0.02, 0.09);
-                self.apply_segment_swing(rival_index, counter_swing, &[]);
-            }
-        }
+        // movement; expose it as an in-game response, not as polling evidence.
+        let rival_response = if id == ActionId::RestAndPrepare {
+            None
+        } else if let Some(rival_index) = self.strongest_rival() {
+            let candidate_name = self.candidates[rival_index].name.clone();
+            let share_before = self.polls[rival_index];
+            let counter_swing = self.rng.between(0.02, 0.09);
+            self.apply_segment_swing(rival_index, counter_swing, &[]);
+            Some(RivalResponse {
+                candidate_name,
+                share_before,
+                share_after: self.polls[rival_index],
+            })
+        } else {
+            None
+        };
 
         let sanction_trust_penalty = if negative_tactic_detected { 16.0 } else { 0.0 };
         let sanction_turnout_penalty = if negative_tactic_detected { 0.16 } else { 0.0 };
@@ -2056,8 +2074,10 @@ impl GameState {
         }
 
         Ok(ActionOutcome {
+            id,
             action_name: action.name,
             category: id.category(),
+            rival_response,
             event_title,
             share_before,
             share_after: self.polls[self.player_index],
@@ -2735,6 +2755,23 @@ mod tests {
         assert!(game.polls.iter().all(|share| *share >= 0.0));
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
         assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn action_outcome_records_rival_countermovement_for_campaign_recap() {
+        let mut game = GameState::new(2024, Side::Challenger, 707);
+        let action = game.apply_action(ActionId::CommunityTour).unwrap();
+        let rival = action
+            .rival_response
+            .expect("a campaigning action should draw a rival response");
+        assert_ne!(
+            rival.candidate_name,
+            game.candidates[game.player_index].name
+        );
+        assert!(rival.share_after > rival.share_before);
+
+        let rest = game.apply_action(ActionId::RestAndPrepare).unwrap();
+        assert!(rest.rival_response.is_none());
     }
 
     #[test]

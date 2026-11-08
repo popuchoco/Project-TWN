@@ -806,7 +806,7 @@ fn run_interactive(
             break;
         };
         match game.apply_action(action_id) {
-            Ok(outcome) => print_action_outcome(game, &outcome),
+            Ok(outcome) => print_action_outcome(game, &outcome, staffer_mode),
             Err(message) => println!("{message}\n"),
         }
     }
@@ -1302,7 +1302,7 @@ fn run_auto_mode(
         };
         summary.record(&recommendation);
         if show_progress {
-            print_action_outcome(game, &outcome);
+            print_action_outcome(game, &outcome, staffer_mode);
         }
     }
     summary
@@ -2003,7 +2003,11 @@ fn tsv_cell(value: &str) -> String {
     value.replace(['\t', '\r', '\n'], " ")
 }
 
-fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutcome) {
+fn print_action_outcome(
+    game: &GameState,
+    outcome: &project_twn::sim::ActionOutcome,
+    staffer_mode: bool,
+) {
     let candidate_name = &game.candidates[game.player_index].name;
     println!(
         "✓ 第 {} 週・第 {} 天 [{}] {}：{} 支持度 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
@@ -2052,8 +2056,73 @@ fn print_action_outcome(game: &GameState, outcome: &project_twn::sim::ActionOutc
         outcome.stamina_after,
         outcome.field_capacity_after
     );
+    if staffer_mode {
+        if let Some(response) = &outcome.rival_response {
+            println!(
+                "  對手回應（遊戲模型）：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點）；競爭盤勢也會隨每日行動變化。",
+                response.candidate_name,
+                response.share_before,
+                response.share_after,
+                response.share_after - response.share_before
+            );
+        }
+        println!("  劇情推進：{}", staffer_action_reaction(outcome));
+    }
     if outcome.day == DAYS_PER_WEEK {
         print_poll_table(game);
+    }
+}
+
+fn staffer_action_reaction(outcome: &project_twn::sim::ActionOutcome) -> &'static str {
+    use ActionId::*;
+
+    if outcome.negative_tactic_detected {
+        return "查核資料與完整紀錄同時送進新聞室，原本想搶下的版面變成連夜說明；團隊必須承受支持與信任下滑。";
+    }
+    match outcome.id {
+        CampaignHeadquarters => match outcome.week {
+            1..=3 => "總部的白板終於掛上第一張行程表，林予安要求每個承諾都要有負責人和回覆期限。",
+            _ => "總部遲來的燈光亮到深夜；團隊得先補上流程缺口，才追得上對手已排好的地方行程。",
+        },
+        SupportersAssociation => "後援會開始接起地方電話，陳秀惠把尚未完成的陳情也交進聯絡清單，提醒團隊支持者不是一次性名單。",
+        VolunteerCanvassing | GroundTeamLeaflets | StreetSweep | TurnoutMobilization => {
+            if outcome.week >= 9 {
+                "志工把最後一輪回報貼上戰情牆；名單多了幾個願意出門的人，也留下尚未找到的住戶。"
+            } else {
+                "路口行程結束後，志工把居民追問寫進回報表；方致遠的團隊也公布了新的掃街路線。"
+            }
+        }
+        CommunityTour
+        | LegalAssembly
+        | ReligiousCommunityVisit
+        | PilgrimageParticipation
+        | MassAttendance => {
+            "拜會結束，地方夥伴沒有替候選人背書，只要求把共同關心的事和彼此不同的立場都說清楚。"
+        }
+        VulnerableCommunityCare | DisasterResponseVisit | PublicServices | CrisisResponse => {
+            "服務窗口回報已接到第一批需求，但仍有個案等待；林予安把候選人行程往後挪，要求先確認誰能接手。"
+        }
+        PolicyDelivery | PolicyForum | PolicyPresentation | Debate => {
+            if outcome.week >= 9 {
+                "政見回答被剪成短片流傳，周以晴仍追問成本與期限；團隊把完整資料和未完成項目一併公開。"
+            } else {
+                "政策組把下一版成本表交給候選人，方致遠的幕僚已在記者群組追問財源與時程。"
+            }
+        }
+        TransparencyReport | PublicMessage | MediaInterview | FactCheckResponse | OversightPetition => {
+            "周以晴把查證結果與待確認欄位並排刊出；團隊可以更正錯誤，卻不能只挑有利的半段回應。"
+        }
+        CoalitionTalks | PollCoordination => {
+            if outcome.coordination_note.is_some() {
+                "協商結果傳回總部，合作方仍保留自己的招牌與主張；共同動員不代表分歧已經消失。"
+            } else {
+                "協商沒有立刻定案。林予安把下一次會談留在行事曆，並要求今天先把各方不能退讓的條件寫明。"
+            }
+        }
+        RestAndPrepare => "總部暫時關掉一半燈光，候選人補足體力，幕僚留下來整理明天必須回覆的問題。",
+        FabricatedPoll | AnonymousSmear | CoordinatedOpinionWar => {
+            "查核尚未確認來源，團隊沒有把暫時無事當成安全；完整紀錄已交由負責人保全。"
+        }
     }
 }
 

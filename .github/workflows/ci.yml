@@ -138,6 +138,8 @@ jobs:
           if ($routeIndex -lt 0 -or $values[$routeIndex].Split(">").Count -ne 7) { throw "Staffer log omitted the focus and six briefing decisions." }
           $output = Get-Content target/ci-staffer-output.txt -Raw
           if ([regex]::Matches($output, "今日選戰").Count -ne 84) { throw "Staffer mode should narrate all 84 daily campaign scenes." }
+          if ([regex]::Matches($output, "劇情推進：").Count -ne 84) { throw "Each daily action should advance the staffer campaign story." }
           if ([regex]::Matches($output, "【幕僚會議｜第 ").Count -ne 6) { throw "Staffer mode should resolve six strategic briefings." }
+          if (-not $output.Contains("對手回應（遊戲模型）")) { throw "Staffer mode omitted the rival's modeled response." }
           if (-not $output.Contains("候選人支持度檢視（遊戲模型值，非實際民調）")) { throw "Staffer poll briefing omitted its model-only label." }
           if (-not $output.Contains("幕僚模式回顧")) { throw "Staffer campaign omitted its closing recap." }
