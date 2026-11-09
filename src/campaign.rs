@@ -292,7 +292,13 @@ fn ordinal(year: u16, month: u8, day: u8) -> Option<u16> {
     if month == 0 || month > 12 || day == 0 || day > month_lengths[usize::from(month - 1)] {
         return None;
     }
-    Some(month_lengths[..usize::from(month - 1)].iter().sum::<u8>() as u16 + u16::from(day - 1))
+    Some(
+        month_lengths[..usize::from(month - 1)]
+            .iter()
+            .map(|days| u16::from(*days))
+            .sum::<u16>()
+            + u16::from(day - 1),
+    )
 }
 
 #[cfg(test)]
@@ -305,6 +311,7 @@ mod tests {
         assert_eq!(anniversary_week("2006-08-04", "2006-08-05"), Some(11));
         assert_eq!(anniversary_week("2011-07-20", "2011-07-10"), None);
         assert_eq!(anniversary_week("2002-05-01", "2002-07-20"), Some(0));
+        assert_eq!(anniversary_day_offset("2026-09-30", "2026-10-24"), Some(24));
     }
 
     #[test]
