@@ -5,6 +5,7 @@ use crate::game_content::{
     RegionProfile, VOTER_SEGMENTS,
 };
 use crate::governance::GovernmentOpinion;
+use crate::local_story::LocalStoryProgress;
 use crate::staffer::{
     brief_for_round as staffer_brief_for_round, continuity_bonus as staffer_continuity_bonus,
     StafferBrief, StafferDecision, StafferProgress,
@@ -1052,6 +1053,7 @@ pub struct GameState {
     pub poll_taken_this_week: bool,
     pub coalition_this_week: bool,
     pub story_progress: StoryProgress,
+    pub local_story_progress: LocalStoryProgress,
     pub staffer_progress: StafferProgress,
     final_outcome: Option<ElectionOutcome>,
     rng: Rng,
@@ -1109,6 +1111,7 @@ pub struct ActionOutcome {
     pub objective_target: u8,
     pub objective_completed: bool,
     pub objective_reward: i32,
+    pub local_story_note: Option<&'static str>,
     pub week: u8,
     pub day: u8,
 }
@@ -1582,6 +1585,7 @@ impl GameState {
             poll_taken_this_week: false,
             coalition_this_week: false,
             story_progress: StoryProgress::default(),
+            local_story_progress: LocalStoryProgress::default(),
             staffer_progress: StafferProgress::default(),
             final_outcome: None,
             rng,
@@ -2176,6 +2180,15 @@ impl GameState {
         }
         self.stamina =
             (self.stamina - action.stamina_cost + action.stamina_recovery).clamp(0.0, 100.0);
+        let local_story_note = if self.region.is_some() {
+            self.local_story_progress.record_action(
+                id,
+                preview.local_match,
+                negative_tactic_detected,
+            )
+        } else {
+            None
+        };
         self.action_uses[action_index(id)] = self.action_uses[action_index(id)].saturating_add(1);
         let mut objective_completed = false;
         let mut objective_reward = 0;
@@ -2279,6 +2292,7 @@ impl GameState {
             objective_target,
             objective_completed,
             objective_reward,
+            local_story_note,
             week,
             day,
         })
@@ -2510,6 +2524,9 @@ impl GameState {
             return Err(
                 "staffer decisions must follow the campaign schedule and their valid choice sets",
             );
+        }
+        if !self.local_story_progress.is_valid() {
+            return Err("local story relationships must remain within -3..=3");
         }
         match self.setup.timeline {
             EventTimeline::SeededWeekly => {
@@ -3373,6 +3390,64 @@ mod tests {
         assert_eq!(game.candidates.len(), 3);
         assert_eq!(game.player_index, 1);
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn local_story_memory_is_enabled_only_for_local_scenarios() {
+        let region = crate::game_content::find_region("霧川市").unwrap();
+        let mut local = GameState::new_local_with_style(
+            2026,
+            Side::Challenger,
+            150,
+            CampaignStyle::Organizer,
+            region,
+        );
+        let outcome = local.apply_action(ActionId::CommunityTour).unwrap();
+        assert!(outcome.local_story_note.is_some());
+        assert!(local.local_story_progress.resident_followup_pending());
+        assert!(local.validate().is_ok());
+
+        let mut presidential = GameState::new(2024, Side::Challenger, 150);
+        let outcome = presidential.apply_action(ActionId::CommunityTour).unwrap();
+        assert!(outcome.local_story_note.is_none());
+        assert_eq!(
+            presidential.local_story_progress,
+            LocalStoryProgress::default()
+        );
+    }
+
+    #[test]
+    fn local_story_memory_replays_from_the_same_campaign_action_log() {
+        let region = crate::game_content::find_region("雲棲市").unwrap();
+        let actions = [
+            ActionId::CommunityTour,
+            ActionId::PublicServices,
+            ActionId::VolunteerCanvassing,
+            ActionId::TransparencyReport,
+        ];
+        let mut original = GameState::new_local_with_style(
+            2026,
+            Side::Challenger,
+            151,
+            CampaignStyle::Balanced,
+            region,
+        );
+        for action in actions {
+            original.apply_action(action).unwrap();
+        }
+
+        let mut replayed = GameState::new_local_with_style(
+            2026,
+            Side::Challenger,
+            151,
+            CampaignStyle::Balanced,
+            region,
+        );
+        for action in actions {
+            replayed.apply_action(action).unwrap();
+        }
+        assert_eq!(original.local_story_progress, replayed.local_story_progress);
+        assert!(replayed.validate().is_ok());
     }
 
     #[test]

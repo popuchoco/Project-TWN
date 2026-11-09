@@ -4,6 +4,7 @@ pub mod electoral;
 pub mod game_content;
 pub mod governance;
 pub mod local_content;
+pub mod local_story;
 pub mod presidential_content;
 pub mod primary;
 pub mod recall;

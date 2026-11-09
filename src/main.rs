@@ -382,6 +382,16 @@ fn print_election_night(
     result: &ElectionOutcome,
     seed: u64,
 ) -> Result<(), String> {
+    if let Some(region) = game.region {
+        println!(
+            "\n地方故事收束：{}",
+            game.local_story_progress.ending_reflection(region)
+        );
+        println!(
+            "地方關係回顧：{}",
+            game.local_story_progress.summary(region)
+        );
+    }
     let regions = game
         .region
         .map(|region| vec![region])
@@ -2222,6 +2232,13 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
             println!("人物記憶回訪：{echo}");
         }
     }
+    if !staffer_mode {
+        if let Some(region) = game.region {
+            if let Some(echo) = game.local_story_progress.callback(week, day, region) {
+                println!("地方故事回訪：{echo}");
+            }
+        }
+    }
     if staffer_mode && game.day == 0 {
         let reminder = match game.side {
             Side::Incumbent => "執政方幕僚備忘：清楚區分已完成、進行中與超出權責的承諾。",
@@ -3390,6 +3407,11 @@ fn print_action_outcome(
             "  {note}（本次行動預估揭露率 {:.0}%）",
             outcome.detection_probability * 100.0
         );
+    }
+    if !staffer_mode {
+        if let Some(note) = outcome.local_story_note {
+            println!("  地方關係回饋：{note}");
+        }
     }
     if let Some(title) = outcome.objective_title {
         let completion = if outcome.objective_completed && outcome.objective_reward > 0 {
