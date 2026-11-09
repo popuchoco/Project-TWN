@@ -245,6 +245,6 @@ jobs:
 
       - name: Smoke-test local candidate and party status labels
         run: |
-          cargo run -- --year 2026 --region 霧川市 --role challenger --auto --seed 86 | Out-File -Encoding utf8 target/ci-local-status.txt
+          @("r", "q", "y") | cargo run -- --year 2026 --region 霧川市 --role challenger --seed 86 | Out-File -Encoding utf8 target/ci-local-status.txt
           $local = Get-Content target/ci-local-status.txt -Raw
           if (-not $local.Contains("地方候選人制，未另設政黨票支持度") -or $local.Contains("政黨票支持度（不分區情境）")) { throw "Local mode should not label candidate support as a party-ticket poll." }
