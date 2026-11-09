@@ -1,9 +1,13 @@
 use project_twn::campaign::{CampaignDifficulty, CampaignSetup, EventPack, EventTimeline};
+use project_twn::governance::issue_label;
 use project_twn::history::{
     find_party, find_region, PartyProfile, RegionProfile, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS,
     PARTY_PROFILES, REGIONS, VOTER_SEGMENTS,
 };
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
+use project_twn::recall::{
+    RecallActionId, RecallEnding, RecallPhase, RecallSide, RecallState, RecallTemplate,
+};
 use project_twn::sim::{
     ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameError, GameState,
     ModelParameters, SensitivityParameter, Side, StafferOutcome, StoryOutcome, TacticCategory,
@@ -48,6 +52,9 @@ struct Options {
     setup: CampaignSetup,
     primary: bool,
     staffer_mode: bool,
+    recall_mode: bool,
+    recall_side: Option<RecallSide>,
+    recall_template: RecallTemplate,
     log: Option<String>,
     batch: Option<u32>,
     sweep_styles: bool,
@@ -173,6 +180,36 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    if options.recall_mode {
+        if options.batch.is_some()
+            || options.primary
+            || options.staffer_mode
+            || options.region.is_some()
+            || options.party.is_some()
+            || options.role.is_some()
+            || options.log.is_some()
+        {
+            return Err(
+                "罷免模式為獨立地方政治戰役，不能搭配批次、初選、幕僚競選或總統／地方選舉參數。"
+                    .to_string(),
+            );
+        }
+        let side = match options.recall_side {
+            Some(side) => side,
+            None if options.auto => RecallSide::Initiator,
+            None => ask_recall_side()?,
+        };
+        let mut game = RecallState::new(options.recall_template, side, options.seed);
+        print_recall_intro(&game);
+        if options.auto {
+            run_recall_auto(&mut game);
+        } else {
+            run_recall_interactive(&mut game)?;
+        }
+        print_recall_result(&game);
+        return Ok(());
+    }
+
     if let Some(runs) = options.batch {
         if options.staffer_mode {
             return Err(
@@ -190,6 +227,11 @@ fn run() -> Result<(), String> {
         }
         let (region, selected_party) = resolve_scenario(&options, role)?;
         return run_batch(&options, runs, role, region, selected_party);
+    }
+    if !options.recall_mode
+        && (options.recall_side.is_some() || options.recall_template != RecallTemplate::Synthetic)
+    {
+        return Err("--recall-side 與 --recall-template 必須搭配 --recall。".to_string());
     }
 
     if options.staffer_mode && options.primary {
@@ -330,6 +372,9 @@ fn parse_args() -> Result<Options, String> {
         setup: CampaignSetup::default(),
         primary: false,
         staffer_mode: false,
+        recall_mode: false,
+        recall_side: None,
+        recall_template: RecallTemplate::Synthetic,
         log: None,
         batch: None,
         sweep_styles: false,
@@ -350,6 +395,21 @@ fn parse_args() -> Result<Options, String> {
             "--auto" | "--demo" => options.auto = true,
             "--primary" => options.primary = true,
             "--staffer" => options.staffer_mode = true,
+            "--recall" => options.recall_mode = true,
+            "--recall-side" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--recall-side 後面需要 initiator 或 opposition".to_string())?;
+                options.recall_side = Some(parse_recall_side(&value)?);
+            }
+            "--recall-template" => {
+                let value = args.next().ok_or_else(|| {
+                    "--recall-template 後面需要 fictional、low-turnout、concentrated 或 high-mobilization".to_string()
+                })?;
+                options.recall_template = RecallTemplate::parse(&value).ok_or_else(|| {
+                    format!("未知罷免情境盤型：{value}；可選 fictional、low-turnout、concentrated、high-mobilization")
+                })?;
+            }
             "--region" => {
                 options.region = Some(
                     args.next()
@@ -552,6 +612,243 @@ fn ask_role() -> Result<Side, String> {
     }
 }
 
+fn parse_recall_side(value: &str) -> Result<RecallSide, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "initiator" | "support" | "yes" | "罷免" | "提議" => Ok(RecallSide::Initiator),
+        "opposition" | "oppose" | "no" | "反對" | "反罷免" => Ok(RecallSide::Opposition),
+        _ => Err(format!(
+            "罷免陣營請用 initiator 或 opposition，收到：{value}"
+        )),
+    }
+}
+
+fn ask_recall_side() -> Result<RecallSide, String> {
+    loop {
+        println!("玩家扮演人民發動罷免的提議／連署方，或反對罷免方；本模式不包含彈劾。");
+        println!("選擇陣營：1) 罷免提議／連署方  2) 反對罷免方");
+        print!("請輸入 1 或 2：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        match input.trim() {
+            "1" => return Ok(RecallSide::Initiator),
+            "2" => return Ok(RecallSide::Opposition),
+            _ => println!("請輸入 1 或 2。"),
+        }
+    }
+}
+
+fn print_recall_intro(game: &RecallState) {
+    println!("\n=== 人民罷免戰役｜Project-TWN ===");
+    println!(
+        "虛構罷免目標：區域立法委員 {}　｜虛構選區：{}\n情境盤型：{}　玩家陣營：{}　選舉人：{}　隨機種子：固定可重現",
+        game.template.target_name(),
+        game.template.district_name(),
+        game.template.label(),
+        game.player_side.label(),
+        game.electorate
+    );
+    println!("{}", game.template.briefing());
+    println!("僅模擬人民依法發動的罷免；不納入彈劾。所有人物、選區與盤勢均為虛構情境，不是歷史個案重演、實際民調或因果結論。");
+    println!(
+        "法定門檻：提議 {} 人（1%）→有效連署 {} 人（10%）→同意票至少 {} 人（1/4），且多於不同意票。",
+        game.proposal_threshold, game.signature_threshold, game.yes_floor
+    );
+    println!("時間視窗：提議準備 14 日（2 個 7 日區塊）、連署 60 日（6 個 10 日區塊）、投票宣傳 28 日（4 個 7 日區塊）；每次選擇推進一個策略區塊。");
+    println!(
+        "負面選項包含不實／死亡連署；不會成為有效連署，並可能帶來名冊查核及信任／預算懲處。\n"
+    );
+}
+
+fn print_recall_status(game: &RecallState) {
+    let phase_days = match game.phase {
+        RecallPhase::Proposal => game.days_elapsed,
+        RecallPhase::Signature => game.days_elapsed.saturating_sub(14),
+        RecallPhase::VoteCampaign => game.days_elapsed.saturating_sub(74),
+        RecallPhase::Complete => 0,
+    };
+    println!(
+        "\n--- {}｜本階段第 {} / {} 日｜策略區塊 {}/{} ---",
+        game.phase.label(),
+        phase_days,
+        game.current_days_limit(),
+        game.blocks_elapsed,
+        game.current_block_limit()
+    );
+    match game.phase {
+        RecallPhase::Proposal => println!(
+            "提議進度：{} / {} 人　｜　陣營信任：罷免方 {:.1}、反罷免方 {:.1}　｜　預算 {}",
+            game.proposal_count,
+            game.proposal_threshold,
+            game.initiator_trust,
+            game.opposition_trust,
+            game.budget
+        ),
+        RecallPhase::Signature => println!(
+            "有效連署估計：{} / {} 人　｜表面總數：{}（含不實名冊 {}；不計入有效數）　｜查核壓力 {:.0}%　｜預算 {}",
+            game.valid_signatures(),
+            game.signature_threshold,
+            game.raw_signature_count(),
+            game.fraudulent_signatures,
+            game.audit_pressure * 100.0,
+            game.budget
+        ),
+        RecallPhase::VoteCampaign => {
+            let (yes, no) = game.estimated_vote_totals();
+            println!(
+                "罷免方意向 {:.1}%／動員 {:.1}　｜反罷免方意向 {:.1}%／動員 {:.1}　｜預估票數 同意 {}、不同意 {}　｜同意票門檻 {}　｜預算 {}",
+                game.yes_intention_pct,
+                game.yes_mobilization,
+                game.no_intention_pct,
+                game.no_mobilization,
+                yes,
+                no,
+                game.yes_floor,
+                game.budget
+            );
+        }
+        RecallPhase::Complete => {}
+    }
+}
+
+fn run_recall_interactive(game: &mut RecallState) -> Result<bool, String> {
+    while game.phase != RecallPhase::Complete {
+        print_recall_status(game);
+        println!("\n【本階段行動】每次選擇代表一個跨日策略區塊，行動會觸發對手回應：");
+        let choices = game.action_options();
+        for (index, action) in choices.iter().enumerate() {
+            let risk = if matches!(
+                action.id,
+                RecallActionId::FalseSignatures | RecallActionId::DeceasedSignatures
+            ) {
+                "｜違規高風險"
+            } else {
+                ""
+            };
+            println!(
+                "  {}) {}｜預算 -{}{}\n     {}",
+                index + 1,
+                action.label,
+                action.cost,
+                risk,
+                action.description
+            );
+        }
+        print!("選行動（p 盤勢，? 說明，q 離開）：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        let value = input.trim();
+        if value.eq_ignore_ascii_case("p") {
+            print_recall_status(game);
+            continue;
+        }
+        if value == "?" {
+            println!("每階段提供少量情境相關選項；提議 14 日、連署 60 日、投票宣傳 28 日。成案及罷免成立都需分別通過法定人數／票數門檻；同意票支持度不等於有效簽名或實際出席。\n");
+            continue;
+        }
+        if value.eq_ignore_ascii_case("q") {
+            print!("離開目前罷免戰役？輸入 y 確認，其餘輸入返回：");
+            io::stdout().flush().map_err(|error| error.to_string())?;
+            let mut confirm = String::new();
+            io::stdin()
+                .read_line(&mut confirm)
+                .map_err(|error| error.to_string())?;
+            if confirm.trim().eq_ignore_ascii_case("y") {
+                return Ok(false);
+            }
+            continue;
+        }
+        let Ok(selection) = value.parse::<usize>() else {
+            println!("請輸入行動編號、p、? 或 q。\n");
+            continue;
+        };
+        let Some(action) = choices.get(selection.saturating_sub(1)) else {
+            println!("沒有這個行動選項。\n");
+            continue;
+        };
+        match game.apply_action(action.id) {
+            Ok(outcome) => {
+                println!("\n✓ {}｜{}", outcome.label, outcome.note);
+                println!(
+                    "日程已推進至第 {} 日；預算餘額 {}。",
+                    outcome.days_elapsed, outcome.budget_after
+                );
+            }
+            Err(error) => println!("{error}\n"),
+        }
+    }
+    Ok(true)
+}
+
+fn run_recall_auto(game: &mut RecallState) {
+    while game.phase != RecallPhase::Complete {
+        let action = match (game.player_side, game.phase) {
+            (RecallSide::Initiator, RecallPhase::Proposal) => RecallActionId::BuildCoalition,
+            (RecallSide::Initiator, RecallPhase::Signature) if game.blocks_elapsed == 0 => {
+                RecallActionId::BuildCoalition
+            }
+            (RecallSide::Initiator, RecallPhase::Signature) => RecallActionId::SignatureStations,
+            (RecallSide::Initiator, RecallPhase::VoteCampaign) => RecallActionId::FieldMobilization,
+            (RecallSide::Opposition, RecallPhase::Proposal) => RecallActionId::BuildCoalition,
+            (RecallSide::Opposition, RecallPhase::Signature) => RecallActionId::LegalAudit,
+            (RecallSide::Opposition, RecallPhase::VoteCampaign) => {
+                RecallActionId::CounterMobilization
+            }
+            (_, RecallPhase::Complete) => break,
+        };
+        if game.apply_action(action).is_err() {
+            break;
+        }
+    }
+}
+
+fn print_recall_result(game: &RecallState) {
+    let Some(result) = &game.result else {
+        println!("\n罷免戰役已離開，尚未結算。");
+        return;
+    };
+    println!("\n=== 罷免程序結算 ===");
+    match result.ending {
+        RecallEnding::ProposalFailed => println!("未成案：提議人數未達門檻。"),
+        RecallEnding::SignaturesFailed => println!("連署未成案：有效連署不足。"),
+        RecallEnding::RecallPassed => println!("罷免通過：兩項投票門檻均達成。"),
+        RecallEnding::RecallRejected => println!("罷免未通過：至少一項投票門檻未達成。"),
+    }
+    println!("原因：{}", result.reason);
+    if matches!(
+        result.ending,
+        RecallEnding::RecallPassed | RecallEnding::RecallRejected
+    ) {
+        println!(
+            "預估投票：同意 {}、不同意 {}、合計 {}；同意票門檻 {}。這是遊戲結算值，不是民調或預測。",
+            result.yes_votes, result.no_votes, result.turnout, result.yes_floor
+        );
+    }
+    println!(
+        "程序檢視：有效連署 {} / {}；提議門檻 {}；罷免同意票須至少達原選區選舉人 1/4，且多於不同意票。",
+        result.valid_signatures,
+        result.signature_threshold,
+        game.proposal_threshold
+    );
+    if game.fraud_attempts > 0 {
+        println!(
+            "不實名冊處理：嘗試 {} 次、表面數量 {}；{}。",
+            game.fraud_attempts,
+            game.fraudulent_signatures,
+            if game.fraud_exposed {
+                "查核揭露並受遊戲內懲處"
+            } else {
+                "違規名冊仍未計入有效連署"
+            }
+        );
+    }
+}
+
 fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_mode: bool) {
     println!("\n=== 臺灣選戰模擬器 | Project-TWN ===");
     println!(
@@ -611,7 +908,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
         "選民結構：{} 個遊戲用選民原型；權重是可調模型參數，不代表實際人口或選民占比。",
         VOTER_SEGMENTS.len()
     );
-    println!("民調口徑：本作目前只有候選人選舉支持度，尚未建模國政／政府施政滿意度民調；團隊信任指數也不是政府支持度。\n");
+    println!("指標口徑：候選人支持度、政府施政滿意度、議題評價／關注度與團隊信任分開建模；都是情境值，不是實際民調。\n");
     println!(
         "玩家能力值（遊戲建構，非歷史評分）：政策 {:.0}／組織 {:.0}／溝通 {:.0}\n",
         game.player_attributes.policy,
@@ -629,7 +926,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
         println!();
     }
     print_poll_summary(game);
-    println!("口徑提醒：支持度是本場遊戲的候選人競爭指標，不是實際民調；目前未建模國政／政府施政滿意度。\n");
+    println!("口徑提醒：候選人支持度、政府施政滿意度、議題評價與幕僚團隊信任分開建模；均為情境值，不是實際民調。\n");
     println!("行動對候選人支持度的效果會受團隊信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
 }
 
@@ -684,6 +981,16 @@ fn print_poll_table(game: &GameState) {
             segment.name, segment.weight_pct, player_support
         );
     }
+    let opinion = &game.government_opinion;
+    let salient_issue = opinion.most_salient_issue();
+    println!(
+        "政府施政滿意度｜整體 {:.1}/100；最受關注議題：{}（議題評價 {:.1}/100、關注度 {:.1}/100；遊戲模型值）",
+        opinion.administration_approval,
+        issue_label(salient_issue),
+        opinion.issue_rating(salient_issue),
+        opinion.issue_priority(salient_issue)
+    );
+    println!("政府評價、候選人選舉支持度與團隊信任分開計算；此面板不是民調。\n");
     if game.candidates.len() > 2 {
         println!("互比式簡化情境：把其他候選人的支持平均分配給比較雙方；這不是實際互比民調。");
         for (index, candidate) in game
@@ -721,6 +1028,15 @@ fn print_poll_summary(game: &GameState) {
             game.polls[index] - candidate.historical_share
         );
     }
+    let opinion = &game.government_opinion;
+    let salient_issue = opinion.most_salient_issue();
+    println!(
+        "政府施政滿意度情境值：{:.1}/100；議題焦點：{}（評價 {:.1}/100、關注度 {:.1}/100）。此數值不等於候選人支持度。",
+        opinion.administration_approval,
+        issue_label(salient_issue),
+        opinion.issue_rating(salient_issue),
+        opinion.issue_priority(salient_issue)
+    );
     if game.candidates.len() > 2 {
         println!("互比式情境為遊戲簡化試算；完整分眾與各組互比請在行動選單輸入 p。每位候選人比例合計 100%。");
         for (index, candidate) in game
@@ -1087,6 +1403,14 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
             Side::Challenger => "在野方幕僚備忘：每項監督或批評都要接上替代方案、時程與資源來源。",
         };
         println!("{reminder}");
+        let opinion = &game.government_opinion;
+        let issue = opinion.most_salient_issue();
+        println!(
+            "幕僚民意簡報：政府施政滿意度 {:.1}/100；目前最受關注「{}」，議題評價 {:.1}/100。候選人支持度、政府評價與團隊信任分開；這是遊戲情境值，不是民調。",
+            opinion.administration_approval,
+            issue_label(issue),
+            opinion.issue_rating(issue)
+        );
     }
     if staffer_mode && (day == 1 || day == 7) {
         if let Some(focus) = game.staffer_progress.focus() {
@@ -2662,6 +2986,7 @@ fn print_usage() {
   project-twn --history
   project-twn --regions
   project-twn --parties
+  project-twn --recall [--recall-side initiator|opposition] [--recall-template fictional|low-turnout|concentrated|high-mobilization] [--seed 整數] [--auto]
   project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable|hardball]
       [--difficulty story|standard|hard] [--event-pack all|democracy|cross-strait|local|media] [--timeline weekly|date]
@@ -2674,6 +2999,7 @@ fn print_usage() {
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
   cargo run -- --simulate 2024 --role challenger --difficulty story --event-pack democracy --timeline date
   cargo run -- --year 2024 --role challenger --staffer --seed 42
+  cargo run -- --recall --recall-side initiator --recall-template high-mobilization --seed 42
   cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --strategy issue --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sweep-strategies --batch-log strategy.tsv
@@ -2683,6 +3009,7 @@ fn print_usage() {
 年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 --staffer 開啟幕僚模式：設定競選主軸，並在六個關鍵週處理陳情、地方協調、事件回應、支持度檢視與最後布局；幕僚決策不占每日行動，但會消耗預算及影響遊戲資源。此單場模式目前不支援 --batch 或 --primary。
+--recall 開啟人民罷免模式：在罷免提議／連署方或反對罷免方之間選擇，進行 14 日提議、60 日連署與 28 日投票宣傳；可選虛構的低投票參與、集中支持或高強度動員盤型。本模式不含彈劾；遊戲中人物與事件皆採虛構合成，不對應真實對象。不實／死亡連署是違規高風險行動，不計入有效連署，遭查核會受遊戲內懲處。
 難度可選故事／標準／挑戰；事件包可篩選民主化、兩岸、地方民生或媒體信任議題；--timeline date 會將有日期錨點的事件周年映射到 12 週戰役日曆，沒有錨點的週次留白。這是可切換的遊戲排程，不表示史實在遊戲年份重演。
 省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。

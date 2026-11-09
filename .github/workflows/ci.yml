@@ -100,7 +100,7 @@ jobs:
           if (-not $advice.Contains("預估揭露")) { throw "Interactive action list omitted exposure forecasts." }
           if (-not $advice.Contains("本場玩家身分") -or -not $advice.Contains("玩家操控：侯友宜 / 趙少康")) { throw "Opening screen omitted the assigned player candidate." }
           if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("柯文哲 / 吳欣盈")) { throw "Opening screen omitted the opponent roster." }
-          if (-not $advice.Contains("尚未建模國政／政府施政滿意度民調")) { throw "Opening screen did not distinguish election support from government approval." }
+          if (-not $advice.Contains("政府施政滿意度情境值") -or -not $advice.Contains("最受關注議題")) { throw "Opening screen did not show the separate government and issue indicators." }
           if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「侯友宜 / 趙少康")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
           if ($advice.Contains("分眾支持度（原型權重")) { throw "Opening snapshot should keep voter-segment detail behind the poll lookup." }
           if (-not $advice.Contains("行動詳情｜") -or -not $advice.Contains("推薦理由：")) { throw "Interactive action details omitted explanations." }
@@ -112,6 +112,7 @@ jobs:
           $interaction = Get-Content target/ci-interaction.txt -Raw
           if (-not $interaction.Contains("行動方式：")) { throw "Interactive help did not explain the controls." }
           if ([regex]::Matches($interaction, "候選人選舉支持度").Count -lt 2) { throw "Poll lookup should be available during action selection." }
+          if (-not $interaction.Contains("政府施政滿意度｜整體") -or -not $interaction.Contains("議題評價")) { throw "Poll lookup omitted the separate government opinion indicators." }
           if (-not $interaction.Contains("分眾支持度（原型權重")) { throw "Poll lookup omitted the detailed voter-segment panel." }
           if ([regex]::Matches($interaction, "✓ 第 ").Count -ne 2) { throw "Declining the exit prompt should return to the campaign." }
 
@@ -164,3 +165,17 @@ jobs:
           if (-not $output.Contains("對手回應（遊戲模型）")) { throw "Staffer mode omitted the rival's modeled response." }
           if (-not $output.Contains("候選人支持度檢視（遊戲模型值，非實際民調）")) { throw "Staffer poll briefing omitted its model-only label." }
           if (-not $output.Contains("幕僚模式回顧")) { throw "Staffer campaign omitted its closing recap." }
+
+      - name: Smoke-test fictional recall campaigns
+        run: |
+          cargo run -- --recall --recall-side initiator --recall-template low-turnout --auto --seed 501 | Out-File -Encoding utf8 target/ci-recall-initiator.txt
+          cargo run -- --recall --recall-side opposition --recall-template high-mobilization --auto --seed 502 | Out-File -Encoding utf8 target/ci-recall-opposition.txt
+          $initiator = Get-Content target/ci-recall-initiator.txt -Raw
+          $opposition = Get-Content target/ci-recall-opposition.txt -Raw
+          foreach ($output in @($initiator, $opposition)) {
+            if (-not $output.Contains("所有人物、選區與盤勢均為虛構情境")) { throw "Recall campaign did not identify its fictional scenario." }
+            if (-not $output.Contains("虛構罷免目標：區域立法委員") -or -not $output.Contains("虛構選區：")) { throw "Recall campaign did not identify its fictional target and district." }
+            if (-not $output.Contains("提議") -or -not $output.Contains("有效連署") -or -not $output.Contains("罷免程序結算")) { throw "Recall campaign omitted a procedural phase or final resolution." }
+          }
+          if (-not $initiator.Contains("罷免提議／連署方") -or -not $opposition.Contains("反對罷免方")) { throw "Recall campaign did not identify the selected player side." }
+          if (-not $initiator.Contains("兩項投票門檻") -and -not $initiator.Contains("罷免未通過")) { throw "Recall campaign did not present its threshold-based result." }

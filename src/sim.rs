@@ -1,4 +1,5 @@
 use crate::campaign::{anniversary_day_offset, CampaignSetup, EventTimeline, DATED_EVENTS};
+use crate::governance::GovernmentOpinion;
 use crate::history::{
     baseline_election, challenger_candidate_index, events_for_campaign, incumbent_candidate_index,
     party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
@@ -1022,6 +1023,8 @@ pub struct GameState {
     pub player_index: usize,
     pub candidates: Vec<SimCandidate>,
     pub polls: Vec<f64>,
+    /// Separate in-game administration and issue ratings; not candidate polls.
+    pub government_opinion: GovernmentOpinion,
     pub voter_segments: Vec<VoterSegmentPoll>,
     pub budget: i32,
     pub headquarters_established: bool,
@@ -1432,6 +1435,7 @@ impl GameState {
             player_index,
             candidates,
             polls,
+            government_opinion: GovernmentOpinion::default(),
             voter_segments,
             budget: setup.difficulty.starting_budget(),
             headquarters_established: false,
@@ -1603,6 +1607,12 @@ impl GameState {
         self.turnout_momentum =
             (self.turnout_momentum + choice.mobilization_delta).clamp(0.0, 100.0);
         self.stamina = (self.stamina + choice.stamina_delta).clamp(0.0, 100.0);
+        self.government_opinion.observe(
+            choice.issue,
+            0.0,
+            0.0,
+            0.35 + if event_match { 0.2 } else { 0.0 },
+        );
         let support_after = self.polls[self.player_index];
         let note = if continuity.note.is_some() {
             continuity.note
@@ -1997,6 +2007,10 @@ impl GameState {
             None
         };
 
+        let observed_issue = action.issues.first().copied().unwrap_or(Issue::Governance);
+        let event_issue = current_event.map(|event| event.issue);
+        self.observe_government_action(id, observed_issue, event_issue, negative_tactic_detected);
+
         // A competing campaign responds to daily activity with a small seeded
         // movement; expose it as an in-game response, not as polling evidence.
         let rival_response = if id == ActionId::RestAndPrepare {
@@ -2112,6 +2126,48 @@ impl GameState {
         self.phase().label()
     }
 
+    fn observe_government_action(
+        &mut self,
+        action: ActionId,
+        issue: Issue,
+        event_issue: Option<Issue>,
+        negative_tactic_detected: bool,
+    ) {
+        let (approval_delta, issue_delta) = match (self.side, action) {
+            (Side::Incumbent, ActionId::PolicyDelivery) => (0.35, 0.65),
+            (Side::Incumbent, ActionId::CrisisResponse | ActionId::DisasterResponseVisit) => {
+                (0.25, 0.55)
+            }
+            (Side::Incumbent, ActionId::PublicServices | ActionId::VulnerableCommunityCare) => {
+                (0.30, 0.60)
+            }
+            (Side::Incumbent, ActionId::TransparencyReport | ActionId::FactCheckResponse) => {
+                (0.12, 0.30)
+            }
+            (Side::Challenger, ActionId::OversightPetition) => (-0.12, -0.35),
+            (Side::Challenger, ActionId::FactCheckResponse) => (-0.08, -0.20),
+            _ => (0.0, 0.0),
+        };
+        let integrity_penalty = if negative_tactic_detected && self.side == Side::Incumbent {
+            -0.55
+        } else {
+            0.0
+        };
+        self.government_opinion.observe(
+            issue,
+            approval_delta + integrity_penalty,
+            issue_delta + if negative_tactic_detected { -0.45 } else { 0.0 },
+            0.30 + if event_issue == Some(issue) {
+                0.45
+            } else {
+                0.0
+            },
+        );
+        if let Some(event_issue) = event_issue.filter(|event_issue| *event_issue != issue) {
+            self.government_opinion.observe(event_issue, 0.0, 0.0, 0.45);
+        }
+    }
+
     pub fn phase(&self) -> CampaignPhase {
         if self.is_finished() || self.is_settled() {
             CampaignPhase::Complete
@@ -2207,6 +2263,17 @@ impl GameState {
         }
         if self.voter_segments.is_empty() {
             return Err("at least one voter segment is required");
+        }
+        if !self.government_opinion.administration_approval.is_finite()
+            || !(0.0..=100.0).contains(&self.government_opinion.administration_approval)
+            || self
+                .government_opinion
+                .issue_approval
+                .iter()
+                .chain(self.government_opinion.issue_salience.iter())
+                .any(|value| !value.is_finite() || !(0.0..=100.0).contains(value))
+        {
+            return Err("government opinion values must be finite and within 0..=100");
         }
         let segment_weight: f64 = self
             .voter_segments
@@ -3261,6 +3328,37 @@ mod tests {
         assert_eq!(game.day, 0);
         assert_eq!(game.polls[game.player_index], before_support);
         assert!(game.current_staffer_brief().is_some());
+    }
+
+    #[test]
+    fn government_opinion_and_candidate_support_are_separate_game_indicators() {
+        let mut game = GameState::new(2024, Side::Incumbent, 1201);
+        let candidate_polls = game.polls.clone();
+        let starting_approval = game.government_opinion.administration_approval;
+        game.government_opinion
+            .observe(Issue::Education, 1.0, -2.0, 3.0);
+        assert_eq!(game.polls, candidate_polls);
+        assert_eq!(
+            game.government_opinion.administration_approval,
+            starting_approval + 1.0
+        );
+        assert_eq!(game.government_opinion.issue_rating(Issue::Education), 48.0);
+        assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn staffer_decision_adds_issue_intelligence_without_confusing_it_with_approval() {
+        let mut game = GameState::new(2024, Side::Challenger, 1202);
+        let approval_before = game.government_opinion.administration_approval;
+        let choice = game.current_staffer_brief().unwrap().choices[0];
+        let salience_before = game.government_opinion.issue_priority(choice.issue);
+        game.apply_staffer_choice(0).unwrap();
+        assert_eq!(
+            game.government_opinion.administration_approval,
+            approval_before
+        );
+        assert!(game.government_opinion.issue_priority(choice.issue) > salience_before);
+        assert!(game.validate().is_ok());
     }
 
     #[test]
