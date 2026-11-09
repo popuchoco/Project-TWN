@@ -1204,6 +1204,7 @@ fn print_recall_intro(game: &RecallState) {
         game.template.constituency_issue(),
         game.target_record
     );
+    println!("人物與社區關係會記住回訪、協作及資訊查證；正向互動可帶來小幅後續意向連動。\n");
     println!("僅模擬人民依法發動的罷免；不納入彈劾。所有人物、選區與盤勢均為虛構情境，不是歷史個案重演、實際民調或因果結論。");
     println!(
         "法定門檻：提議 {} 人（1%）→有效連署 {} 人（10%）→同意票至少 {} 人（1/4），且多於不同意票。",
@@ -1244,6 +1245,7 @@ fn print_recall_status(game: &RecallState) {
         "目標公共服務紀錄 {:.1}/100　｜罷免方信任 {:.1}　｜反罷免方信任 {:.1}",
         game.target_record, game.initiator_trust, game.opposition_trust
     );
+    println!("人物關係：{}", game.story_progress.summary());
     match game.phase {
         RecallPhase::Proposal => println!(
             "提議進度：{} / {} 人　｜　陣營信任：罷免方 {:.1}、反罷免方 {:.1}　｜　預算 {}",
@@ -1364,6 +1366,16 @@ fn run_recall_interactive(
                 journal.push(SaveCommand::RecallAction(outcome.id.index()));
                 checkpoint_recall(save_path, save_config, journal)?;
                 println!("\n✓ {}｜{}", outcome.label, outcome.note);
+                if outcome.relationship_bonus.abs() >= 0.005 {
+                    println!(
+                        "關係連動：玩家陣營意向支持 {:+.2} 點。",
+                        outcome.relationship_bonus
+                    );
+                }
+                if let Some(echo) = outcome.story_echo {
+                    println!("劇情回訪：{echo}");
+                }
+                println!("人物關係更新：{}", game.story_progress.summary());
                 let report = outcome.report;
                 match outcome.phase_before {
                     RecallPhase::Proposal | RecallPhase::ProposalSupplement => println!(
@@ -1432,8 +1444,19 @@ fn run_recall_auto(game: &mut RecallState) {
             }
             (_, RecallPhase::Complete) => break,
         };
-        if game.apply_action(action).is_err() {
-            break;
+        match game.apply_action(action) {
+            Ok(outcome) => {
+                if outcome.relationship_bonus.abs() >= 0.005 {
+                    println!(
+                        "關係連動：玩家陣營意向支持 {:+.2} 點。",
+                        outcome.relationship_bonus
+                    );
+                }
+                if let Some(echo) = outcome.story_echo {
+                    println!("劇情回訪：{echo}");
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -1451,6 +1474,11 @@ fn print_recall_result(game: &RecallState) {
         RecallEnding::RecallRejected => println!("罷免未通過：至少一項投票門檻未達成。"),
     }
     println!("原因：{}", result.reason);
+    println!("人物關係回顧：{}", game.story_progress.summary());
+    println!(
+        "故事收束：{}",
+        game.story_progress.ending_reflection(&result.ending)
+    );
     if matches!(
         result.ending,
         RecallEnding::RecallPassed | RecallEnding::RecallRejected

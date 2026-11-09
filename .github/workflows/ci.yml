@@ -215,10 +215,13 @@ jobs:
           $opposition = Get-Content target/ci-recall-opposition.txt -Raw
           $turnReport = Get-Content target/ci-recall-turn-report.txt -Raw
           if (-not $turnReport.Contains("本區塊變化（含對手回應）") -or -not $turnReport.Contains("提議人數")) { throw "Interactive recall omitted its after-action report." }
+          if (-not $turnReport.Contains("人物關係更新：") -or -not $turnReport.Contains("陳秀惠")) { throw "Interactive recall omitted its relationship state." }
           foreach ($output in @($initiator, $opposition)) {
             if (-not $output.Contains("所有人物、選區與盤勢均為虛構情境")) { throw "Recall campaign did not identify its fictional scenario." }
             if (-not $output.Contains("虛構罷免目標：區域立法委員") -or -not $output.Contains("虛構選區：")) { throw "Recall campaign did not identify its fictional target and district." }
             if (-not $output.Contains("提議") -or -not $output.Contains("有效連署") -or -not $output.Contains("罷免程序結算")) { throw "Recall campaign omitted a procedural phase or final resolution." }
+            if (-not $output.Contains("人物關係回顧：") -or -not $output.Contains("故事收束：")) { throw "Recall campaign omitted its character-memory resolution." }
+            if (-not $output.Contains("劇情回訪：") -or -not $output.Contains("關係連動：")) { throw "Recall campaign omitted a delayed story callback or relationship strategy effect." }
           }
           if (-not $initiator.Contains("罷免提議／連署方") -or -not $opposition.Contains("反對罷免方")) { throw "Recall campaign did not identify the selected player side." }
           foreach ($output in @($initiator, $opposition)) {
@@ -243,6 +246,7 @@ jobs:
           if (-not $roster.Contains("玩家操控：沈知行｜政黨／名單：群島共治黨") -or -not $roster.Contains("22 個虛構地區")) { throw "Candidate roster was not applied to the election-night simulation." }
           if (-not $recallResume.Contains("第 7 / 14 日") -or -not $recallResume.Contains("符合本作可罷免對象條件")) { throw "Recall save did not resume its deterministic phase and eligible fictional target." }
           if (-not $recallResume.Contains("一次補提") -or -not $recallResume.Contains("符合本作可罷免對象條件")) { throw "Recall mode omitted eligibility or the one-time supplement process." }
+          if (-not $recallResume.Contains("志工隊長高原澤 1")) { throw "Recall save replay did not reconstruct the relationship memory." }
           if (-not $stafferResume.Contains("遊戲模式：幕僚模式") -or -not $stafferResume.Contains("投票日開票｜虛構情境估算")) { throw "Staffer save did not resume the selected mode and resolve its final count." }
 
       - name: Smoke-test local candidate and party status labels

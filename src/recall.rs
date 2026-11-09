@@ -444,6 +444,235 @@ pub struct RecallResult {
     pub reason: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecallStoryProgress {
+    resident_trust: i8,
+    volunteer_trust: i8,
+    reporter_trust: i8,
+    resident_followup_pending: bool,
+    integrity_breach: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RecallRelationship {
+    Resident,
+    Volunteer,
+    Reporter,
+}
+
+impl RecallStoryProgress {
+    pub fn summary(self) -> String {
+        format!(
+            "居民聯絡人陳秀惠 {}（{}）｜志工隊長高原澤 {}（{}）｜地方記者周以晴 {}（{}）｜居民回覆待追蹤：{}｜名冊誠信破口：{}",
+            self.resident_trust,
+            recall_relationship_tone(self.resident_trust),
+            self.volunteer_trust,
+            recall_relationship_tone(self.volunteer_trust),
+            self.reporter_trust,
+            recall_relationship_tone(self.reporter_trust),
+            if self.resident_followup_pending { "是" } else { "否" },
+            if self.integrity_breach { "是" } else { "否" }
+        )
+    }
+
+    fn record_action(&mut self, side: RecallSide, action: RecallActionId) {
+        if matches!(
+            action,
+            RecallActionId::FalseSignatures | RecallActionId::DeceasedSignatures
+        ) {
+            let (reporter_penalty, resident_penalty) =
+                if action == RecallActionId::DeceasedSignatures {
+                    (-5, -3)
+                } else {
+                    (-4, -2)
+                };
+            adjust_recall_trust(&mut self.reporter_trust, reporter_penalty);
+            adjust_recall_trust(&mut self.resident_trust, resident_penalty);
+            self.integrity_breach = true;
+            return;
+        }
+
+        let Some((relationship, delta)) = recall_relationship_delta(side, action) else {
+            return;
+        };
+        let trust = match relationship {
+            RecallRelationship::Resident => &mut self.resident_trust,
+            RecallRelationship::Volunteer => &mut self.volunteer_trust,
+            RecallRelationship::Reporter => &mut self.reporter_trust,
+        };
+        adjust_recall_trust(trust, delta);
+
+        match (side, action) {
+            (_, RecallActionId::CommunityListening) => {
+                if self.resident_followup_pending {
+                    adjust_recall_trust(&mut self.resident_trust, 1);
+                    self.resident_followup_pending = false;
+                } else {
+                    self.resident_followup_pending = true;
+                }
+            }
+            (RecallSide::Opposition, RecallActionId::LocalService) => {
+                self.resident_followup_pending = true;
+            }
+            (RecallSide::Initiator, RecallActionId::DoorToDoor)
+            | (RecallSide::Opposition, RecallActionId::QuietDeescalation) => {
+                if self.resident_followup_pending {
+                    adjust_recall_trust(&mut self.resident_trust, 1);
+                    self.resident_followup_pending = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn relationship_bonus(self, side: RecallSide, action: RecallActionId) -> f64 {
+        let Some((relationship, _)) = recall_relationship_delta(side, action) else {
+            return 0.0;
+        };
+        let trust = match relationship {
+            RecallRelationship::Resident => self.resident_trust,
+            RecallRelationship::Volunteer => self.volunteer_trust,
+            RecallRelationship::Reporter => self.reporter_trust,
+        };
+        f64::from(trust) * 0.12
+    }
+
+    fn story_echo(self, phase: RecallPhase, block: u8) -> Option<&'static str> {
+        Some(match (phase, block) {
+            (RecallPhase::Proposal, 2) if self.resident_followup_pending => {
+                "陳秀惠把訪談紀錄交給團隊，也留下了回覆期限；居民願意再談一次，但不會替團隊記住承諾。"
+            }
+            (RecallPhase::Proposal, 2) if self.resident_trust >= 2 => {
+                "陳秀惠帶回第二批在地問題，團隊先完成前次回覆，再把仍有歧見的項目列入提議說明。"
+            }
+            (RecallPhase::Proposal, 2) => {
+                "陳秀惠再度確認訪談紀錄；她沒有拒絕協助，只要求下一次說明能提出具體依據。"
+            }
+            (RecallPhase::ProposalSupplement, 1) if self.integrity_breach => {
+                "補提窗口開啟，選務查對要求先釐清名冊異常；團隊必須面對先前留下的誠信破口。"
+            }
+            (RecallPhase::ProposalSupplement, 1) => {
+                "提議人數進入一次補提窗口，志工隊長高原澤重新排班，並逐項確認聯絡資料是否完整。"
+            }
+            (RecallPhase::Signature, 3) if self.integrity_breach => {
+                "地方記者周以晴拿出名冊差異清單，追問團隊如何修正；只談動員，已無法取代公開交代。"
+            }
+            (RecallPhase::Signature, 3) if self.reporter_trust >= 2 => {
+                "周以晴核對過資料來源後，願意等團隊補齊最後一份紀錄；她仍把未確認部分標為待查。"
+            }
+            (RecallPhase::Signature, 3) => {
+                "周以晴要求說明簽署流程與資料來源；她不接受把表面名冊數字當成有效連署。"
+            }
+            (RecallPhase::Signature, 6) if self.integrity_breach => {
+                "連署查對即將完成，異常紀錄仍留在卷宗裡；有效名冊與表面數字被分開計算。"
+            }
+            (RecallPhase::Signature, 6) if self.volunteer_trust >= 2 => {
+                "高原澤把各站點的交接表逐一對齊，志工願意支援下一階段，也要求保留查對紀錄。"
+            }
+            (RecallPhase::Signature, 6) => {
+                "高原澤收回尚未核實的站點回報；下一階段能否動員，取決於名冊結果與團隊交接。"
+            }
+            (RecallPhase::SignatureSupplement, 1) if self.integrity_breach => {
+                "連署補提期間，團隊先交代名冊缺口；新增數量仍須經過查對，不能抵銷違規紀錄。"
+            }
+            (RecallPhase::SignatureSupplement, 1) => {
+                "一次補提窗口只開放短時間，高原澤重排志工班表，陳秀惠則追問前次回訪是否完成。"
+            }
+            (RecallPhase::VoteCampaign, 2) if self.resident_followup_pending => {
+                "投票宣傳進入中段，陳秀惠仍拿著待回覆清單；她提醒團隊，催票不能取代回訪。"
+            }
+            (RecallPhase::VoteCampaign, 2) if self.resident_trust >= 2 => {
+                "陳秀惠陪同團隊回到社區，居民仍有不同立場，但知道問題可以向誰追蹤。"
+            }
+            (RecallPhase::VoteCampaign, 2) => {
+                "陳秀惠把尚未完成的服務事項帶到論壇；雙方都得回答居民真正關心的問題。"
+            }
+            (RecallPhase::VoteCampaign, 4) if self.resident_followup_pending => {
+                "最後一場行程結束，待回覆事項仍在桌上；投票結果不會自動完成這次承諾。"
+            }
+            (RecallPhase::VoteCampaign, 4) if self.integrity_breach => {
+                "投票日前夕，團隊同時面對票數動員與名冊爭議；後者仍會留在本次戰役紀錄。"
+            }
+            (RecallPhase::VoteCampaign, 4) if self.volunteer_trust >= 2 => {
+                "高原澤把最後一份分區回報交給團隊；支持者知道集合資訊，也保留各自的投票判斷。"
+            }
+            (RecallPhase::VoteCampaign, 4) => {
+                "投票日前夕，周以晴整理完雙方公開資料；她記下了仍待查證的部分，沒有替任何一方補上結論。"
+            }
+            _ => return None,
+        })
+    }
+
+    pub fn ending_reflection(self, ending: &RecallEnding) -> &'static str {
+        if self.integrity_breach {
+            "名冊誠信爭議與投票結果分開記錄；即使程序已結束，信任修復仍未完成。"
+        } else if self.resident_followup_pending {
+            "居民回訪承諾尚未結案，後續仍需要交代進度。"
+        } else if self.resident_trust >= 2 && self.reporter_trust >= 2 {
+            "居民窗口與地方記者都保留了追蹤管道，陣營分歧沒有因此消失。"
+        } else {
+            match ending {
+                RecallEnding::ProposalFailed => {
+                    "提議未成案，地方聯絡網仍留下哪些問題尚未回答的紀錄。"
+                }
+                RecallEnding::SignaturesFailed => {
+                    "連署未成案，團隊需要檢視動員、名冊品質與地方回應之間的落差。"
+                }
+                RecallEnding::RecallPassed => "罷免程序通過，後續職務遞補仍須依法另行辦理。",
+                RecallEnding::RecallRejected => "罷免案未通過，支持與反對的分歧仍留在選區。",
+            }
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        [
+            self.resident_trust,
+            self.volunteer_trust,
+            self.reporter_trust,
+        ]
+        .iter()
+        .all(|trust| (-3..=3).contains(trust))
+    }
+}
+
+fn recall_relationship_delta(
+    side: RecallSide,
+    action: RecallActionId,
+) -> Option<(RecallRelationship, i8)> {
+    Some(match (side, action) {
+        (_, RecallActionId::CommunityListening) => (RecallRelationship::Resident, 1),
+        (RecallSide::Initiator, RecallActionId::DoorToDoor)
+        | (RecallSide::Opposition, RecallActionId::LocalService)
+        | (RecallSide::Opposition, RecallActionId::QuietDeescalation) => {
+            (RecallRelationship::Resident, 1)
+        }
+        (_, RecallActionId::BuildCoalition | RecallActionId::FieldMobilization)
+        | (RecallSide::Initiator, RecallActionId::SignatureStations)
+        | (RecallSide::Opposition, RecallActionId::CounterMobilization) => {
+            (RecallRelationship::Volunteer, 1)
+        }
+        (_, RecallActionId::EvidenceBriefing | RecallActionId::PublicForum)
+        | (RecallSide::Opposition, RecallActionId::PublicDefense | RecallActionId::LegalAudit) => {
+            (RecallRelationship::Reporter, 1)
+        }
+        _ => return None,
+    })
+}
+
+fn adjust_recall_trust(value: &mut i8, delta: i8) {
+    *value = (*value + delta).clamp(-3, 3);
+}
+
+fn recall_relationship_tone(value: i8) -> &'static str {
+    match value {
+        3..=i8::MAX => "信任穩固",
+        1..=2 => "願意持續回應",
+        0 => "關係尚待累積",
+        -2..=-1 => "開始保持距離",
+        _ => "信任明顯受損",
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RecallState {
     pub template: RecallTemplate,
@@ -477,6 +706,7 @@ pub struct RecallState {
     pub proposal_supplement_used: bool,
     pub administrative_checks_completed: u8,
     pub result: Option<RecallResult>,
+    pub story_progress: RecallStoryProgress,
     seed: u64,
     action_uses: [[u8; RecallActionId::COUNT]; 2],
 }
@@ -491,6 +721,8 @@ pub struct RecallActionOutcome {
     pub phase_after: RecallPhase,
     pub days_elapsed: u16,
     pub budget_after: u8,
+    pub relationship_bonus: f64,
+    pub story_echo: Option<&'static str>,
     pub report: RecallTurnReport,
 }
 
@@ -548,6 +780,7 @@ impl RecallState {
             proposal_supplement_used: false,
             administrative_checks_completed: 0,
             result: None,
+            story_progress: RecallStoryProgress::default(),
             seed: if seed == 0 {
                 0x5457_4e52_4543_414c
             } else {
@@ -803,6 +1036,8 @@ impl RecallState {
             });
         }
         let phase_before = self.phase;
+        let block_in_phase = self.blocks_elapsed.saturating_add(1);
+        let relationship_bonus = self.story_progress.relationship_bonus(self.player_side, id);
         let (yes_votes_before, no_votes_before) = self.estimated_vote_totals();
         let report_before = RecallTurnReport {
             proposal_before: self.proposal_count,
@@ -822,6 +1057,8 @@ impl RecallState {
         };
         self.budget -= spec.cost;
         let note = self.apply_effect(self.player_side, id);
+        self.apply_relationship_bonus(self.player_side, relationship_bonus);
+        self.story_progress.record_action(self.player_side, id);
         let opponent_action = self.ai_action(self.player_side.opponent());
         let ai_note = self.apply_effect(self.player_side.opponent(), opponent_action);
         let block_days = self.phase.block_days();
@@ -830,6 +1067,7 @@ impl RecallState {
         self.budget = self.budget.saturating_add(3).min(100);
         let final_note = format!("{note}；對手回應：{ai_note}");
         self.advance_phase_if_needed();
+        let story_echo = self.story_progress.story_echo(phase_before, block_in_phase);
         let (yes_votes_after, no_votes_after) = self.estimated_vote_totals();
         let report = RecallTurnReport {
             proposal_after: self.proposal_count,
@@ -850,8 +1088,24 @@ impl RecallState {
             phase_after: self.phase,
             days_elapsed: self.days_elapsed,
             budget_after: self.budget,
+            relationship_bonus,
+            story_echo,
             report,
         })
+    }
+
+    fn apply_relationship_bonus(&mut self, side: RecallSide, bonus: f64) {
+        match side {
+            RecallSide::Initiator if bonus > 0.0 => self.increase_yes_intention(bonus),
+            RecallSide::Initiator if bonus < 0.0 => {
+                self.yes_intention_pct = (self.yes_intention_pct + bonus).max(0.0);
+            }
+            RecallSide::Opposition if bonus > 0.0 => self.increase_no_intention(bonus),
+            RecallSide::Opposition if bonus < 0.0 => {
+                self.no_intention_pct = (self.no_intention_pct + bonus).max(0.0);
+            }
+            _ => {}
+        }
     }
 
     fn apply_effect(&mut self, side: RecallSide, action: RecallActionId) -> String {
@@ -1218,6 +1472,9 @@ impl RecallState {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.story_progress.is_valid() {
+            return Err("recall relationship values must be within -3..=3");
+        }
         for value in [
             self.signature_quality,
             self.yes_intention_pct,
@@ -1375,6 +1632,100 @@ mod tests {
         assert!(outcome.report.target_record_after < outcome.report.target_record_before);
         assert_eq!(outcome.report.valid_signatures_before, 0);
         assert_eq!(outcome.report.valid_signatures_after, 0);
+    }
+
+    #[test]
+    fn repeated_community_listening_builds_trust_and_closes_the_resident_followup() {
+        let mut state = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 104);
+        let first = state
+            .apply_action(RecallActionId::CommunityListening)
+            .unwrap();
+        assert_eq!(first.relationship_bonus, 0.0);
+        assert!(state.story_progress.resident_followup_pending);
+
+        let second = state
+            .apply_action(RecallActionId::CommunityListening)
+            .unwrap();
+        assert!((second.relationship_bonus - 0.12).abs() < f64::EPSILON);
+        assert!(!state.story_progress.resident_followup_pending);
+        assert!(second.story_echo.unwrap().contains("完成前次回覆"));
+        assert!(state
+            .story_progress
+            .summary()
+            .contains("居民回覆待追蹤：否"));
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn false_signatures_break_reporter_trust_and_weaken_later_evidence_bonus() {
+        let mut state = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 105);
+        state.phase = RecallPhase::Signature;
+        state.days_elapsed = PROPOSAL_DAYS;
+
+        state.apply_action(RecallActionId::FalseSignatures).unwrap();
+        assert!(state.story_progress.integrity_breach);
+        assert_eq!(state.story_progress.reporter_trust, -3);
+        assert!(state.story_progress.summary().contains("名冊誠信破口：是"));
+
+        let response = state
+            .apply_action(RecallActionId::EvidenceBriefing)
+            .unwrap();
+        assert!((response.relationship_bonus + 0.36).abs() < f64::EPSILON);
+        assert!(state.story_progress.reporter_trust < 0);
+    }
+
+    #[test]
+    fn opposition_service_promises_can_be_fulfilled_by_later_listening() {
+        let mut memory = RecallStoryProgress::default();
+        memory.record_action(RecallSide::Opposition, RecallActionId::LocalService);
+        assert!(memory.resident_followup_pending);
+        assert_eq!(
+            memory.relationship_bonus(RecallSide::Opposition, RecallActionId::CommunityListening),
+            0.12
+        );
+
+        memory.record_action(RecallSide::Opposition, RecallActionId::CommunityListening);
+        assert!(!memory.resident_followup_pending);
+        assert_eq!(memory.resident_trust, 3);
+        assert!(memory.is_valid());
+    }
+
+    #[test]
+    fn recall_story_memory_is_reconstructed_by_replaying_action_choices() {
+        let mut original = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 106);
+        let mut journal = Vec::new();
+        for action in [
+            RecallActionId::BuildCoalition,
+            RecallActionId::BuildCoalition,
+        ] {
+            let outcome = original.apply_action(action).unwrap();
+            journal.push(outcome.id);
+        }
+
+        let mut replayed = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 106);
+        for action in journal {
+            replayed.apply_action(action).unwrap();
+        }
+        assert_eq!(original.story_progress, replayed.story_progress);
+        assert_eq!(original.phase, replayed.phase);
+        assert_eq!(original.days_elapsed, replayed.days_elapsed);
+        assert_eq!(original.proposal_count, replayed.proposal_count);
+        assert_eq!(original.yes_intention_pct, replayed.yes_intention_pct);
+        assert!(replayed.story_progress.summary().contains("高原澤 2"));
+    }
+
+    #[test]
+    fn recall_relationship_state_is_bounded_and_validated() {
+        let mut memory = RecallStoryProgress::default();
+        for _ in 0..8 {
+            memory.record_action(RecallSide::Initiator, RecallActionId::BuildCoalition);
+        }
+        assert_eq!(memory.volunteer_trust, 3);
+        assert!(memory.is_valid());
+
+        let mut invalid = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 107);
+        invalid.story_progress.reporter_trust = 4;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
