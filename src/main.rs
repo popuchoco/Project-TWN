@@ -39,7 +39,8 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline\tstory_path\tstaffer_path";
 const BATCH_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\tsensitivity_parameter\tmultiplier\twinner_candidate\twinner_party\tplayer_party\tplayer_won\tplayer_win_probability\tplayer_final_share\tsigned_margin\tobjectives_completed\tbudget_remaining\tstamina_remaining\ttrust\tmobilization\tpolicy\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tsensitivity_parameter_2\tmultiplier_2\tpositive_actions\tneutral_actions\tnegative_actions\tmodule_support_mean\tmodule_context_mean\tmodule_trust_mean\tmodule_mobilization_mean\tmodule_objective_mean\tmodule_sustainability_mean\tmodule_integrity_mean\tmodule_infrastructure_mean\taction_composition\tdifficulty\tevent_pack\ttimeline\tstory_path";
@@ -182,11 +183,106 @@ impl ActionMenuCategory {
 }
 
 fn main() {
+    install_panic_logger();
     if let Err(message) = run() {
         eprintln!("錯誤：{message}\n");
         print_usage();
         std::process::exit(2);
     }
+}
+
+fn install_panic_logger() {
+    let default_hook = std::panic::take_hook();
+    let preferred_path = crash_log_path();
+    std::panic::set_hook(Box::new(move |panic| {
+        default_hook(panic);
+        let payload = panic
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_string())
+            .or_else(|| panic.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "非文字 panic payload".to_string());
+        let location = panic
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "未知位置".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        match append_diagnostic_entry(
+            &preferred_path,
+            "panic",
+            timestamp,
+            &payload,
+            &location,
+            &backtrace,
+        ) {
+            Ok(()) => eprintln!("遊戲診斷紀錄已寫入：{}", preferred_path.display()),
+            Err(primary_error) => {
+                let fallback_path = env::temp_dir().join("project-twn-crash.log");
+                match append_diagnostic_entry(
+                    &fallback_path,
+                    "panic",
+                    timestamp,
+                    &payload,
+                    &location,
+                    &backtrace,
+                ) {
+                    Ok(()) => eprintln!("遊戲診斷紀錄已寫入：{}", fallback_path.display()),
+                    Err(fallback_error) => eprintln!(
+                        "無法寫入遊戲診斷紀錄（{}；備援路徑也失敗：{}）",
+                        primary_error, fallback_error
+                    ),
+                }
+            }
+        }
+    }));
+}
+
+fn crash_log_path() -> PathBuf {
+    if let Some(path) = env::var_os("PROJECT_TWN_CRASH_LOG") {
+        return PathBuf::from(path);
+    }
+    env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("project-twn-crash.log"))
+        })
+        .unwrap_or_else(|| {
+            env::current_dir()
+                .unwrap_or_default()
+                .join("project-twn-crash.log")
+        })
+}
+
+fn append_diagnostic_entry(
+    path: &Path,
+    kind: &str,
+    timestamp: u64,
+    message: &str,
+    location: &str,
+    backtrace: &str,
+) -> io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "=== Project-TWN {kind} ===")?;
+    writeln!(file, "timestamp_unix: {timestamp}")?;
+    writeln!(file, "version: {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(file, "platform: {} {}", env::consts::OS, env::consts::ARCH)?;
+    writeln!(file, "location: {location}")?;
+    writeln!(file, "message: {message}")?;
+    writeln!(file, "backtrace:\n{backtrace}")?;
+    writeln!(file)?;
+    file.flush()
 }
 
 fn run() -> Result<(), String> {
@@ -4277,5 +4373,32 @@ mod tests {
         assert_eq!(replayed.polls, original.polls);
         assert_eq!(replayed.local_story_progress, original.local_story_progress);
         assert_eq!(replayed.budget, original.budget);
+    }
+
+    #[test]
+    fn panic_diagnostic_entries_include_version_location_and_backtrace() {
+        let path = std::env::temp_dir().join(format!(
+            "project-twn-crash-log-test-{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        append_diagnostic_entry(
+            &path,
+            "panic",
+            123,
+            "test panic",
+            "src/test.rs:4:2",
+            "frame A\nframe B",
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("Project-TWN panic"));
+        assert!(contents.contains("timestamp_unix: 123"));
+        assert!(contents.contains("version:"));
+        assert!(contents.contains("platform:"));
+        assert!(contents.contains("location: src/test.rs:4:2"));
+        assert!(contents.contains("message: test panic"));
+        assert!(contents.contains("frame A\nframe B"));
+        std::fs::remove_file(path).unwrap();
     }
 }
