@@ -1208,6 +1208,7 @@ fn print_recall_intro(game: &RecallState) {
         game.proposal_threshold, game.signature_threshold, game.yes_floor
     );
     println!("時間視窗（遊戲壓縮）：提議準備 14 日、連署 60 日；提議或連署經查對後如接近門檻但仍不足，各有一次最長 10 日補提窗口；成案後投票宣傳 28 日。每次選擇推進一個策略區塊。");
+    println!("行政查對項目（遊戲簡化呈現）：身分核對、罷免資格、重複簽署、名冊完整性；補提不會免除後續查對。");
     println!(
         "負面選項包含不實／死亡連署；不會成為有效連署，並可能帶來名冊查核及信任／預算懲處。\n"
     );
@@ -1259,21 +1260,21 @@ fn print_recall_status(game: &RecallState) {
             SIGNATURE_REVIEW_CHECKS.join("、")
         ),
         RecallPhase::Signature => println!(
-            "有效連署估計：{} / {} 人　｜表面總數：{}（含不實名冊 {}；不計入有效數）　｜行政查對 {}/4（{}）　｜查核壓力 {:.0}%　｜預算 {}",
+            "有效連署估計：{} / {} 人　｜表面總數：{}（含不實名冊 {}；不計入有效數）　｜階段結束查對：身分、資格、重複簽署、名冊完整性　｜查核壓力 {:.0}%　｜預算 {}",
             game.valid_signatures(),
             game.signature_threshold,
             game.raw_signature_count(),
             game.fraudulent_signatures,
-            game.administrative_checks_completed,
-            SIGNATURE_REVIEW_CHECKS.join("、"),
             game.audit_pressure * 100.0,
             game.budget
         ),
         RecallPhase::SignatureSupplement => println!(
-            "一次補提窗口：有效連署 {} / {} 人；尚需 {} 人。已完成行政查對後，補提僅能使用一次、最長 10 日；現有名冊仍接受完整查核。",
+            "一次補提窗口：有效連署 {} / {} 人；尚需 {} 人。已完成行政查對 {} 項（{}）；補提僅能使用一次、最長 10 日，補提名冊仍須查對。",
             game.valid_signatures(),
             game.signature_threshold,
-            game.signature_threshold.saturating_sub(game.valid_signatures())
+            game.signature_threshold.saturating_sub(game.valid_signatures()),
+            game.administrative_checks_completed,
+            SIGNATURE_REVIEW_CHECKS.join("、")
         ),
         RecallPhase::VoteCampaign => {
             let (yes, no) = game.estimated_vote_totals();
