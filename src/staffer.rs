@@ -87,6 +87,11 @@ pub enum StafferDecision {
 pub struct StafferProgress {
     decisions: [Option<StafferDecision>; 6],
     focus: Option<CampaignFocus>,
+    resident_trust: i8,
+    organizer_trust: i8,
+    reporter_trust: i8,
+    team_trust: i8,
+    resident_followup_pending: bool,
 }
 
 impl StafferProgress {
@@ -120,6 +125,21 @@ impl StafferProgress {
             }
             _ => "戰役走到投票日前夕，沒有任何一項單獨選擇保證勝負；團隊只能對一路做過的承諾與取捨負責。",
         }
+    }
+
+    pub fn memory_summary(self) -> String {
+        format!(
+            "角色關係｜居民 {}（{}）、地方聯絡人 {}（{}）、記者 {}（{}）、競選總幹事 {}（{}）；居民回覆待追蹤：{}。",
+            self.resident_trust,
+            relationship_tone(self.resident_trust),
+            self.organizer_trust,
+            relationship_tone(self.organizer_trust),
+            self.reporter_trust,
+            relationship_tone(self.reporter_trust),
+            self.team_trust,
+            relationship_tone(self.team_trust),
+            if self.resident_followup_pending { "是" } else { "否" }
+        )
     }
 
     pub fn summary(self) -> String {
@@ -156,10 +176,105 @@ impl StafferProgress {
         if index == 0 {
             self.focus = focus;
         }
+        self.remember_decision(index, decision);
         true
     }
 
+    fn remember_decision(&mut self, index: usize, decision: StafferDecision) {
+        let StafferDecision::Chosen(id) = decision else {
+            match index {
+                1 => adjust_trust(&mut self.resident_trust, -1),
+                2 => adjust_trust(&mut self.organizer_trust, -1),
+                3 => adjust_trust(&mut self.reporter_trust, -1),
+                4..=5 => adjust_trust(&mut self.team_trust, -1),
+                _ => {}
+            }
+            return;
+        };
+        match id {
+            StafferChoiceId::FocusLivelihood => adjust_trust(&mut self.resident_trust, 1),
+            StafferChoiceId::FocusOpenGovernment => adjust_trust(&mut self.reporter_trust, 1),
+            StafferChoiceId::FocusDemocracy => adjust_trust(&mut self.organizer_trust, 1),
+            StafferChoiceId::PetitionFieldVisit => {
+                adjust_trust(&mut self.resident_trust, 2);
+                self.resident_followup_pending = true;
+            }
+            StafferChoiceId::PetitionVerify => {
+                adjust_trust(&mut self.resident_trust, 1);
+                adjust_trust(&mut self.reporter_trust, 1);
+            }
+            StafferChoiceId::PetitionLocalLiaison => {
+                adjust_trust(&mut self.resident_trust, 1);
+                adjust_trust(&mut self.organizer_trust, 1);
+            }
+            StafferChoiceId::NetworkListening => {
+                adjust_trust(&mut self.organizer_trust, 2);
+                self.resolve_resident_followup();
+            }
+            StafferChoiceId::NetworkForum => {
+                adjust_trust(&mut self.organizer_trust, 1);
+                adjust_trust(&mut self.reporter_trust, 1);
+            }
+            StafferChoiceId::NetworkCoordination => {
+                adjust_trust(&mut self.organizer_trust, 1);
+            }
+            StafferChoiceId::EventVerify => adjust_trust(&mut self.reporter_trust, 2),
+            StafferChoiceId::EventService => adjust_trust(&mut self.resident_trust, 1),
+            StafferChoiceId::EventCounter => adjust_trust(&mut self.reporter_trust, -1),
+            StafferChoiceId::PollReframe => adjust_trust(&mut self.team_trust, -1),
+            StafferChoiceId::PollGroundwork => {
+                adjust_trust(&mut self.resident_trust, 1);
+                adjust_trust(&mut self.organizer_trust, 1);
+                adjust_trust(&mut self.team_trust, 1);
+                self.resolve_resident_followup();
+            }
+            StafferChoiceId::PollHoldLine => {
+                adjust_trust(&mut self.reporter_trust, 1);
+                adjust_trust(&mut self.team_trust, 2);
+            }
+            StafferChoiceId::ClosingDebate => {
+                adjust_trust(&mut self.reporter_trust, 1);
+                adjust_trust(&mut self.team_trust, 1);
+            }
+            StafferChoiceId::ClosingField => {
+                adjust_trust(&mut self.resident_trust, 1);
+                adjust_trust(&mut self.organizer_trust, 1);
+                self.resolve_resident_followup();
+            }
+            StafferChoiceId::ClosingCoalition => {
+                adjust_trust(&mut self.organizer_trust, 2);
+                adjust_trust(&mut self.team_trust, 1);
+            }
+        }
+    }
+
+    fn resolve_resident_followup(&mut self) {
+        if self.resident_followup_pending {
+            adjust_trust(&mut self.resident_trust, 1);
+            self.resident_followup_pending = false;
+        }
+    }
+
     pub(crate) fn is_valid(self, round: u8) -> bool {
+        if [
+            self.resident_trust,
+            self.organizer_trust,
+            self.reporter_trust,
+            self.team_trust,
+        ]
+        .iter()
+        .any(|trust| !(-3..=3).contains(trust))
+        {
+            return false;
+        }
+        if self.resident_followup_pending
+            && !matches!(
+                self.decision(1),
+                Some(StafferDecision::Chosen(StafferChoiceId::PetitionFieldVisit))
+            )
+        {
+            return false;
+        }
         for (index, decision) in self.decisions.iter().enumerate() {
             if decision.is_some() && round < (index as u8 * 2) {
                 return false;
@@ -193,6 +308,20 @@ impl StafferProgress {
                 choice_for(*stage, *id).is_some_and(|choice| choice.affinity == Some(focus))
             })
             .count()
+    }
+}
+
+fn adjust_trust(value: &mut i8, delta: i8) {
+    *value = (*value + delta).clamp(-3, 3);
+}
+
+fn relationship_tone(value: i8) -> &'static str {
+    match value {
+        3..=i8::MAX => "信任穩固",
+        1..=2 => "願意持續回應",
+        0 => "關係尚待累積",
+        -2..=-1 => "開始保持距離",
+        _ => "信任明顯受損",
     }
 }
 
@@ -742,11 +871,11 @@ pub fn daily_scene(week: u8, day: u8) -> Option<(&'static str, &'static str)> {
 pub fn daily_route_echo(week: u8, day: u8, progress: StafferProgress) -> Option<&'static str> {
     let decision_index = match (week, day) {
         (1, 2) => 0,
-        (3, 1) => 1,
-        (5, 1) => 2,
-        (7, 1) => 3,
-        (9, 1) => 4,
-        (11, 1) => 5,
+        (3, 2) => 1,
+        (5, 2) => 2,
+        (7, 2) => 3,
+        (9, 2) => 4,
+        (11, 2) => 5,
         _ => return None,
     };
     let decision = progress.decision(decision_index)?;
@@ -779,6 +908,49 @@ pub fn daily_route_echo(week: u8, day: u8, progress: StafferProgress) -> Option<
             StafferChoiceId::ClosingField => "志工接過最後一輪投票提醒名單，陳秀惠留下尚待處理的陳情：「選舉結束後，這張單也要有人接。」",
             StafferChoiceId::ClosingCoalition => "合作夥伴在共同政見旁簽名，也保留各自的差異；吳明哲把公開版本送到地方群組，沒有替任何人背書。",
         },
+    })
+}
+
+/// Delayed staffer-mode callbacks: characters react to trust and promises
+/// accumulated across earlier briefings, not just the latest choice.
+pub fn character_memory_echo(week: u8, day: u8, progress: StafferProgress) -> Option<&'static str> {
+    if day != 1 {
+        return None;
+    }
+    Some(match week {
+        4 if progress.resident_followup_pending => {
+            "陳秀惠帶著現勘紀錄回到總部：她記得團隊答應回訪，居民也在等下一個日期。"
+        }
+        4 if progress.resident_trust >= 2 => {
+            "陳秀惠帶來更新後的居民清單，先確認哪些回覆已完成，再把新的問題交給窗口。"
+        }
+        4 => "陳秀惠把未回覆的聯絡資料放在桌上；居民沒有撤回陳情，只是不再替團隊補充說明。",
+        6 if progress.organizer_trust >= 2 => {
+            "吳明哲帶著地方夥伴回到座談現場，這次他們願意先提出分工，也要求團隊保留不同意見。"
+        }
+        6 if progress.resident_followup_pending => {
+            "吳明哲提醒團隊：地方合作已經排進行程，前次現勘答應的回覆仍沒有交代。"
+        }
+        6 => "吳明哲仍願意協助聯絡，但把下一次拜會留待團隊先交出明確工作紀錄。",
+        8 if progress.reporter_trust >= 2 => {
+            "周以晴先向團隊確認已知、待查與期限三欄是否更新；她願意等完整資料，不替任何一方補上猜測。"
+        }
+        8 => "周以晴拿出先前的採訪紀錄，追問團隊是否把待查事項也一併公開。",
+        10 if progress.team_trust >= 2 => {
+            "林予安把最後一版行程交給各組負責人，大家沿用共同主軸，也主動補上未完成項目。"
+        }
+        10 if progress.team_trust < 0 => {
+            "林予安要求重新核對最後布局；幾位幕僚仍記得訊息轉向時，沒有人先收到解釋。"
+        }
+        10 => "林予安把不同版本的行程並排，請團隊在最後一週前說清楚哪些承諾仍未完成。",
+        12 if progress.resident_followup_pending => {
+            "選戰行程即將結束，陳秀惠仍拿著那張未回覆清單；選票不會替團隊完成回訪。"
+        }
+        12 if progress.resident_trust >= 2 && progress.organizer_trust >= 2 => {
+            "陳秀惠與吳明哲帶來最後一份地方回報：分歧仍在，但居民知道要向誰追問進度。"
+        }
+        12 => "投票日前夕，林予安把所有未完成事項交接給團隊；選舉結果不會抹去這些承諾。",
+        _ => return None,
     })
 }
 
@@ -889,11 +1061,73 @@ mod tests {
 
         let verify = choice_for(1, StafferChoiceId::PetitionVerify).unwrap();
         progress.record(1, StafferDecision::Chosen(verify.id), verify.focus);
-        assert!(daily_route_echo(3, 1, progress).unwrap().contains("待確認"));
+        assert!(daily_route_echo(3, 1, progress).is_none());
+        assert!(daily_route_echo(3, 2, progress).unwrap().contains("待確認"));
 
         progress.record(2, StafferDecision::Skipped, None);
-        assert!(daily_route_echo(5, 1, progress)
+        assert!(daily_route_echo(5, 1, progress).is_none());
+        assert!(daily_route_echo(5, 2, progress)
             .unwrap()
             .contains("拜會邀請"));
+    }
+
+    #[test]
+    fn staffer_relationships_and_resident_promises_echo_in_later_weeks() {
+        let mut progress = StafferProgress::default();
+        assert!(character_memory_echo(4, 1, progress)
+            .unwrap()
+            .contains("未回覆"));
+
+        let focus = choice_for(0, StafferChoiceId::FocusLivelihood).unwrap();
+        progress.record(0, StafferDecision::Chosen(focus.id), focus.focus);
+        let visit = choice_for(1, StafferChoiceId::PetitionFieldVisit).unwrap();
+        progress.record(1, StafferDecision::Chosen(visit.id), visit.focus);
+        assert!(progress.resident_followup_pending);
+        assert!(character_memory_echo(4, 1, progress)
+            .unwrap()
+            .contains("答應回訪"));
+
+        let listening = choice_for(2, StafferChoiceId::NetworkListening).unwrap();
+        progress.record(2, StafferDecision::Chosen(listening.id), listening.focus);
+        assert!(!progress.resident_followup_pending);
+        assert!(character_memory_echo(6, 1, progress)
+            .unwrap()
+            .contains("願意先提出分工"));
+
+        let verify = choice_for(3, StafferChoiceId::EventVerify).unwrap();
+        progress.record(3, StafferDecision::Chosen(verify.id), verify.focus);
+        assert!(character_memory_echo(8, 1, progress)
+            .unwrap()
+            .contains("願意等完整資料"));
+        let hold_line = choice_for(4, StafferChoiceId::PollHoldLine).unwrap();
+        progress.record(4, StafferDecision::Chosen(hold_line.id), hold_line.focus);
+        assert!(character_memory_echo(10, 1, progress)
+            .unwrap()
+            .contains("沿用共同主軸"));
+        let closing = choice_for(5, StafferChoiceId::ClosingDebate).unwrap();
+        progress.record(5, StafferDecision::Chosen(closing.id), closing.focus);
+        assert!(character_memory_echo(12, 1, progress)
+            .unwrap()
+            .contains("居民知道要向誰追問"));
+        assert!(progress.memory_summary().contains("居民回覆待追蹤：否"));
+        assert!(progress.is_valid(10));
+    }
+
+    #[test]
+    fn unresolved_resident_promise_returns_in_later_scenes_and_the_ending() {
+        let mut progress = StafferProgress::default();
+        let visit = choice_for(1, StafferChoiceId::PetitionFieldVisit).unwrap();
+        progress.record(1, StafferDecision::Chosen(visit.id), visit.focus);
+        progress.record(2, StafferDecision::Skipped, None);
+
+        assert!(progress.resident_followup_pending);
+        assert!(character_memory_echo(6, 1, progress)
+            .unwrap()
+            .contains("前次現勘答應的回覆仍沒有交代"));
+        assert!(character_memory_echo(12, 1, progress)
+            .unwrap()
+            .contains("未回覆清單"));
+        assert!(progress.memory_summary().contains("居民回覆待追蹤：是"));
+        assert!(progress.is_valid(4));
     }
 }

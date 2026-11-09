@@ -24,6 +24,7 @@ use project_twn::sim::{
     CAMPAIGN_ROUNDS, DAYS_PER_WEEK,
 };
 use project_twn::staffer::{
+    character_memory_echo as staffer_character_memory_echo,
     continuity_bonus as staffer_continuity_bonus, daily_route_echo as staffer_daily_route_echo,
     daily_scene as staffer_daily_scene,
 };
@@ -2116,6 +2117,7 @@ fn run_interactive_staffer_brief(
                 .map_err(|error| error.to_string())?;
             journal.push(SaveCommand::SkipStaffer);
             checkpoint_campaign(game, save_path, save_config, journal)?;
+            println!("關係與承諾更新：{}", game.staffer_progress.memory_summary());
             println!("本次幕僚會議暫不處理；戰役每日行動照常繼續。\n");
             return Ok(true);
         }
@@ -2182,6 +2184,11 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
     if let Some(echo) = route_echo {
         println!("劇情回聲：{echo}");
     }
+    if staffer_mode {
+        if let Some(echo) = staffer_character_memory_echo(week, day, game.staffer_progress) {
+            println!("關係回訪：{echo}");
+        }
+    }
     if !staffer_mode && game.day == 0 {
         if let Some(echo) = project_twn::story::character_memory_echo(week, game.story_progress) {
             println!("人物記憶回訪：{echo}");
@@ -2232,6 +2239,10 @@ fn print_staffer_outcome(game: &GameState, outcome: &StafferOutcome) {
     if let Some(note) = outcome.note {
         println!("  {note}");
     }
+    println!(
+        "  關係與承諾更新：{}",
+        game.staffer_progress.memory_summary()
+    );
 }
 
 fn print_staffer_summary(game: &GameState) {
@@ -2244,6 +2255,7 @@ fn print_staffer_summary(game: &GameState) {
             .unwrap_or("未設定"),
         game.staffer_progress.summary()
     );
+    println!("{}", game.staffer_progress.memory_summary());
     println!("{}", game.staffer_progress.ending_note());
 }
 
@@ -2559,6 +2571,7 @@ fn run_auto_mode(
                 } else {
                     let _ = game.skip_staffer_brief();
                     if show_progress {
+                        println!("關係與承諾更新：{}", game.staffer_progress.memory_summary());
                         println!("本次幕僚會議因預算不足而略過。\n");
                     }
                 }
