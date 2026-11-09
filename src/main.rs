@@ -1082,7 +1082,9 @@ fn print_poll_table(game: &GameState) {
     }
     let role_hint = match game.side {
         Side::Incumbent => "執政方可檢視高壓議題的施政缺口；政策回應不會直接等同候選人支持度變化。",
-        Side::Challenger => "在野方可評估高壓議題的監督與替代方案；議題評價不會直接等同候選人支持度變化。",
+        Side::Challenger => {
+            "在野方可評估高壓議題的監督與替代方案；議題評價不會直接等同候選人支持度變化。"
+        }
     };
     println!("{role_hint}");
     println!("政府評價、候選人選舉支持度與團隊信任分開計算；此面板不是民調。\n");

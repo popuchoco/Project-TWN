@@ -333,9 +333,7 @@ impl StrategyModule for ContextFitModule {
         } else {
             0.0
         };
-        f64::from(preview.event_match) * 1.4
-            + f64::from(preview.local_match) * 1.0
-            + issue_fit
+        f64::from(preview.event_match) * 1.4 + f64::from(preview.local_match) * 1.0 + issue_fit
     }
 
     fn rationale(&self, game: &GameState, preview: &ActionPreview) -> Option<&'static str> {
@@ -642,16 +640,14 @@ mod tests {
 
     #[test]
     fn context_module_prioritizes_actions_for_high_pressure_governance_issues() {
-        let mut game = GameState::new_with_style(2024, Side::Challenger, 4, CampaignStyle::Balanced);
-        game.government_opinion.issue_approval[crate::governance::issue_index(
-            crate::game_content::Issue::Economy,
-        )] = 20.0;
-        game.government_opinion.issue_salience[crate::governance::issue_index(
-            crate::game_content::Issue::Economy,
-        )] = 100.0;
-        game.government_opinion.issue_salience[crate::governance::issue_index(
-            crate::game_content::Issue::Trust,
-        )] = 0.0;
+        let mut game =
+            GameState::new_with_style(2024, Side::Challenger, 4, CampaignStyle::Balanced);
+        game.government_opinion.issue_approval
+            [crate::governance::issue_index(crate::game_content::Issue::Economy)] = 20.0;
+        game.government_opinion.issue_salience
+            [crate::governance::issue_index(crate::game_content::Issue::Economy)] = 100.0;
+        game.government_opinion.issue_salience
+            [crate::governance::issue_index(crate::game_content::Issue::Trust)] = 0.0;
 
         let actions = campaign_actions_for(game.side);
         let matching = actions

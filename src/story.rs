@@ -192,63 +192,84 @@ impl StoryMemory {
         match beat_index {
             0 => {
                 self.rain_thread = opening_thread(decision);
-                self.resident_trust = adjust_relation(self.resident_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::FieldVisit) => 6,
-                    StoryDecision::Chosen(StoryChoiceId::PublishFacts) => 4,
-                    StoryDecision::Chosen(StoryChoiceId::CoordinateNetwork) => 2,
-                    _ => -3,
-                });
+                self.resident_trust = adjust_relation(
+                    self.resident_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::FieldVisit) => 6,
+                        StoryDecision::Chosen(StoryChoiceId::PublishFacts) => 4,
+                        StoryDecision::Chosen(StoryChoiceId::CoordinateNetwork) => 2,
+                        _ => -3,
+                    },
+                );
             }
             1 => {
                 self.information_thread = opening_thread(decision);
-                self.team_trust = adjust_relation(self.team_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::PublishFullClip) => 5,
-                    StoryDecision::Chosen(StoryChoiceId::CandidateInterview) => 3,
-                    StoryDecision::Chosen(StoryChoiceId::IgnoreClip) => -5,
-                    _ => -3,
-                });
+                self.team_trust = adjust_relation(
+                    self.team_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::PublishFullClip) => 5,
+                        StoryDecision::Chosen(StoryChoiceId::CandidateInterview) => 3,
+                        StoryDecision::Chosen(StoryChoiceId::IgnoreClip) => -5,
+                        _ => -3,
+                    },
+                );
             }
             2 => {
                 self.rain_thread = followup_thread(self.rain_thread, decision);
-                self.resident_trust = adjust_relation(self.resident_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::TrackProgress) => 3,
-                    StoryDecision::Chosen(StoryChoiceId::PublicRoundtable) => 4,
-                    StoryDecision::Chosen(StoryChoiceId::JointOversight) => 2,
-                    _ => -2,
-                });
-                self.reporter_trust = adjust_relation(self.reporter_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::TrackProgress) => 5,
-                    StoryDecision::Chosen(StoryChoiceId::PublicRoundtable) => 4,
-                    StoryDecision::Chosen(StoryChoiceId::JointOversight) => 3,
-                    _ => -3,
-                });
+                self.resident_trust = adjust_relation(
+                    self.resident_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::TrackProgress) => 3,
+                        StoryDecision::Chosen(StoryChoiceId::PublicRoundtable) => 4,
+                        StoryDecision::Chosen(StoryChoiceId::JointOversight) => 2,
+                        _ => -2,
+                    },
+                );
+                self.reporter_trust = adjust_relation(
+                    self.reporter_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::TrackProgress) => 5,
+                        StoryDecision::Chosen(StoryChoiceId::PublicRoundtable) => 4,
+                        StoryDecision::Chosen(StoryChoiceId::JointOversight) => 3,
+                        _ => -3,
+                    },
+                );
             }
             3 => {
                 self.information_thread = followup_thread(self.information_thread, decision);
-                self.reporter_trust = adjust_relation(self.reporter_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::PublishTimeline) => 6,
-                    StoryDecision::Chosen(StoryChoiceId::OpenQuestions) => 5,
-                    StoryDecision::Chosen(StoryChoiceId::SpokespersonBriefing) => 2,
-                    _ => -3,
-                });
+                self.reporter_trust = adjust_relation(
+                    self.reporter_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::PublishTimeline) => 6,
+                        StoryDecision::Chosen(StoryChoiceId::OpenQuestions) => 5,
+                        StoryDecision::Chosen(StoryChoiceId::SpokespersonBriefing) => 2,
+                        _ => -3,
+                    },
+                );
             }
             4 => {
                 self.rain_thread = closing_thread(self.rain_thread, decision);
-                self.resident_trust = adjust_relation(self.resident_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline) => 4,
-                    StoryDecision::Chosen(StoryChoiceId::ResidentReinspection) => 6,
-                    StoryDecision::Chosen(StoryChoiceId::PublishOpenItems) => 5,
-                    _ => -3,
-                });
+                self.resident_trust = adjust_relation(
+                    self.resident_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline) => 4,
+                        StoryDecision::Chosen(StoryChoiceId::ResidentReinspection) => 6,
+                        StoryDecision::Chosen(StoryChoiceId::PublishOpenItems) => 5,
+                        _ => -3,
+                    },
+                );
             }
             5 => {
                 self.information_thread = closing_thread(self.information_thread, decision);
-                self.reporter_trust = adjust_relation(self.reporter_trust, match decision {
-                    StoryDecision::Chosen(StoryChoiceId::DebateWithRecord) => 5,
-                    StoryDecision::Chosen(StoryChoiceId::InterviewAfterDebate) => 4,
-                    StoryDecision::Chosen(StoryChoiceId::PivotToTurnout) => 2,
-                    _ => -3,
-                });
+                self.reporter_trust = adjust_relation(
+                    self.reporter_trust,
+                    match decision {
+                        StoryDecision::Chosen(StoryChoiceId::DebateWithRecord) => 5,
+                        StoryDecision::Chosen(StoryChoiceId::InterviewAfterDebate) => 4,
+                        StoryDecision::Chosen(StoryChoiceId::PivotToTurnout) => 2,
+                        _ => -3,
+                    },
+                );
             }
             _ => {}
         }
@@ -278,7 +299,10 @@ fn closing_thread(current: StoryThreadStage, decision: StoryDecision) -> StoryTh
     match decision {
         StoryDecision::Chosen(_) => StoryThreadStage::Resolved,
         StoryDecision::Skipped
-            if matches!(current, StoryThreadStage::Open | StoryThreadStage::FollowedUp) =>
+            if matches!(
+                current,
+                StoryThreadStage::Open | StoryThreadStage::FollowedUp
+            ) =>
         {
             StoryThreadStage::Deferred
         }
@@ -1066,7 +1090,10 @@ mod tests {
         assert!(character_memory_echo(10, trusted)
             .unwrap()
             .contains("共同整理的追蹤表"));
-        trusted.record(4, StoryDecision::Chosen(StoryChoiceId::ResidentReinspection));
+        trusted.record(
+            4,
+            StoryDecision::Chosen(StoryChoiceId::ResidentReinspection),
+        );
         assert_eq!(trusted.memory().rain_thread, StoryThreadStage::Resolved);
         assert!(trusted.memory_summary().contains("已收束"));
 
