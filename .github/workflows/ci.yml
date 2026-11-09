@@ -178,4 +178,6 @@ jobs:
             if (-not $output.Contains("提議") -or -not $output.Contains("有效連署") -or -not $output.Contains("罷免程序結算")) { throw "Recall campaign omitted a procedural phase or final resolution." }
           }
           if (-not $initiator.Contains("罷免提議／連署方") -or -not $opposition.Contains("反對罷免方")) { throw "Recall campaign did not identify the selected player side." }
-          if (-not $initiator.Contains("兩項投票門檻") -and -not $initiator.Contains("罷免未通過")) { throw "Recall campaign did not present its threshold-based result." }
+          foreach ($output in @($initiator, $opposition)) {
+            if (-not $output.Contains("未成案") -and -not $output.Contains("罷免通過：") -and -not $output.Contains("罷免未通過：")) { throw "Recall campaign did not present a procedural outcome." }
+          }
