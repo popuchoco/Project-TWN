@@ -102,6 +102,7 @@ jobs:
           if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("柯文哲 / 吳欣盈")) { throw "Opening screen omitted the opponent roster." }
           if (-not $advice.Contains("尚未建模國政／政府施政滿意度民調")) { throw "Opening screen did not distinguish election support from government approval." }
           if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「侯友宜 / 趙少康")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
+          if ($advice.Contains("分眾支持度（原型權重")) { throw "Opening snapshot should keep voter-segment detail behind the poll lookup." }
           if (-not $advice.Contains("行動詳情｜") -or -not $advice.Contains("推薦理由：")) { throw "Interactive action details omitted explanations." }
           if (-not $advice.Contains("結束本場並立即結算？")) { throw "Early exit did not ask for confirmation." }
 
@@ -111,6 +112,7 @@ jobs:
           $interaction = Get-Content target/ci-interaction.txt -Raw
           if (-not $interaction.Contains("行動方式：")) { throw "Interactive help did not explain the controls." }
           if ([regex]::Matches($interaction, "候選人選舉支持度").Count -lt 2) { throw "Poll lookup should be available during action selection." }
+          if (-not $interaction.Contains("分眾支持度（原型權重")) { throw "Poll lookup omitted the detailed voter-segment panel." }
           if ([regex]::Matches($interaction, "✓ 第 ").Count -ne 2) { throw "Declining the exit prompt should return to the campaign." }
 
       - name: Smoke-test campaign setup and date mapping

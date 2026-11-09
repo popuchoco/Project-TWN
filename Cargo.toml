@@ -2,7 +2,7 @@
 name = "project-twn"
 version = "0.1.0"
 edition = "2021"
-description = "臺灣選戰模擬器：歷史資料與互動式競選沙盒"
+description = "以 Rust 打造的臺灣選戰策略遊戲，包含總統與地方選舉情境、候選人與幕僚模式。"
 license = "GPL-3.0-only"
 
 [lib]

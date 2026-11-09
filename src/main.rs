@@ -577,6 +577,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
             game.candidates[game.player_index].name
         );
     }
+    println!("【快速開始】每天選一項行動並推進一天；先選分類，再選行動。輸入 r 執行推薦、? 查看說明，分類內輸入 d 編號先讀詳情。\n本週任務與公共議題會影響策略取捨；輸入 p 查看完整支持度分眾，q 提前結算時會再次確認。\n");
     if let Some(region) = game.region {
         println!(
             "地方情境：{}；上屆首長政黨為 {}。",
@@ -627,9 +628,9 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
         }
         println!();
     }
-    print_poll_table(game);
-    println!("\n互動提示：行動選單輸入 ? 查看操作方式，p 可隨時檢視支持度；選分類後輸入 d 編號可先看行動詳情。離場需再次確認。\n");
-    println!("\n行動對候選人支持度的效果會受團隊信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
+    print_poll_summary(game);
+    println!("口徑提醒：支持度是本場遊戲的候選人競爭指標，不是實際民調；目前未建模國政／政府施政滿意度。\n");
+    println!("行動對候選人支持度的效果會受團隊信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
 }
 
 fn print_player_assignment(game: &GameState) {
@@ -660,7 +661,7 @@ fn print_player_assignment(game: &GameState) {
 
 fn print_poll_table(game: &GameState) {
     let player_name = &game.candidates[game.player_index].name;
-    println!("候選人選舉支持度｜對比式情境（遊戲模型值；非實際民調，也不是國政施政滿意度）");
+    println!("完整支持度檢視｜候選人選舉支持度、分眾與互比情境（均為遊戲模型值）");
     for (index, candidate) in game.candidates.iter().enumerate() {
         let marker = if index == game.player_index {
             "▶"
@@ -669,8 +670,10 @@ fn print_poll_table(game: &GameState) {
         };
         let bar = "█".repeat((game.polls[index] / 2.0).round() as usize);
         println!(
-            "{marker} {:<22} {:>5.2}% {bar}",
-            candidate.name, game.polls[index]
+            "{marker} {:<22} {:>5.2}%（較起始盤 {:+.2}） {bar}",
+            candidate.name,
+            game.polls[index],
+            game.polls[index] - candidate.historical_share
         );
     }
     println!("分眾支持度（原型權重／{player_name} 支持度）— 僅供觀察遊戲模型：");
@@ -683,6 +686,43 @@ fn print_poll_table(game: &GameState) {
     }
     if game.candidates.len() > 2 {
         println!("互比式簡化情境：把其他候選人的支持平均分配給比較雙方；這不是實際互比民調。");
+        for (index, candidate) in game
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != game.player_index)
+        {
+            let other_candidates =
+                (100.0 - game.polls[game.player_index] - game.polls[index]).max(0.0);
+            let player_share = game.polls[game.player_index] + other_candidates * 0.5;
+            println!(
+                "  若比較「{}」與「{}」：{:.1}% 對 {:.1}%",
+                game.candidates[game.player_index].name,
+                candidate.name,
+                player_share,
+                100.0 - player_share
+            );
+        }
+    }
+}
+
+fn print_poll_summary(game: &GameState) {
+    println!("候選人選舉支持度｜本場快照（對比式情境；遊戲模型值）");
+    for (index, candidate) in game.candidates.iter().enumerate() {
+        let marker = if index == game.player_index {
+            "▶"
+        } else {
+            " "
+        };
+        println!(
+            "{marker} {}：{:.2}%（較起始盤 {:+.2} 點）",
+            candidate.name,
+            game.polls[index],
+            game.polls[index] - candidate.historical_share
+        );
+    }
+    if game.candidates.len() > 2 {
+        println!("互比式情境為遊戲簡化試算；完整分眾與各組互比請在行動選單輸入 p。每位候選人比例合計 100%。");
         for (index, candidate) in game
             .candidates
             .iter()
