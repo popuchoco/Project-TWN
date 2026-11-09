@@ -1,7 +1,8 @@
 use project_twn::campaign::{CampaignDifficulty, CampaignSetup, EventPack, EventTimeline};
 use project_twn::election_night::count_by_region;
 use project_twn::electoral::{
-    allocate_party_list_seats, party_ticket_support, PARTY_LIST_SEATS, PARTY_LIST_THRESHOLD_PCT,
+    allocate_party_list_seats, party_ticket_support, PartyTicket, PARTY_LIST_SEATS,
+    PARTY_LIST_THRESHOLD_PCT,
 };
 use project_twn::game_content::{
     find_party, find_region, PartyProfile, RegionProfile, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS,
@@ -1508,7 +1509,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
             game.candidates[game.player_index].name
         );
     }
-    println!("【快速開始】每天選一項行動並推進一天；先選分類，再選行動。輸入 r 執行推薦、? 查看說明，分類內輸入 d 編號先讀詳情。\n本週任務與公共議題會影響策略取捨；輸入 p 查看完整支持度分眾，q 提前結算時會再次確認。\n");
+    println!("【快速開始】每天選一項行動並推進一天；先選分類，再選行動。輸入 r 執行推薦、? 查看說明，分類內輸入 d 編號先讀詳情。\n每日狀態會分開標示候選人支持度與政黨票支持度；執行後以 ✓【已選】標記，每週自動回顧。輸入 p 查看完整支持度分眾，q 提前結算時會再次確認。\n");
     if let Some(region) = game.region {
         println!(
             "地方情境：{}；上屆首長政黨為 {}。",
@@ -1594,7 +1595,9 @@ fn print_player_assignment(game: &GameState) {
 
 fn print_poll_table(game: &GameState) {
     let player_name = &game.candidates[game.player_index].name;
-    println!("完整支持度檢視｜候選人選舉支持度、分眾與互比情境（均為遊戲模型值）");
+    println!(
+        "完整支持度檢視｜候選人選舉支持度、政黨票支持度、分眾與互比情境（遊戲模型值，非實際民調）"
+    );
     for (index, candidate) in game.candidates.iter().enumerate() {
         let marker = if index == game.player_index {
             "▶"
@@ -1609,6 +1612,7 @@ fn print_poll_table(game: &GameState) {
             game.polls[index] - candidate.starting_share
         );
     }
+    print_party_support_table(game);
     println!("分眾支持度（原型權重／{player_name} 支持度）— 僅供觀察遊戲模型：");
     for segment in &game.voter_segments {
         let player_support = segment.polls.get(game.player_index).copied().unwrap_or(0.0);
@@ -1668,7 +1672,7 @@ fn print_poll_table(game: &GameState) {
 }
 
 fn print_poll_summary(game: &GameState) {
-    println!("候選人選舉支持度｜本場快照（對比式情境；遊戲模型值）");
+    println!("候選人選舉支持度（對比式遊戲情境，非實際民調）｜本場快照");
     for (index, candidate) in game.candidates.iter().enumerate() {
         let marker = if index == game.player_index {
             "▶"
@@ -1682,6 +1686,7 @@ fn print_poll_summary(game: &GameState) {
             game.polls[index] - candidate.starting_share
         );
     }
+    print_party_support_table(game);
     let opinion = &game.government_opinion;
     let salient_issue = opinion.most_salient_issue();
     let pressure_issue = opinion.highest_pressure_issue();
@@ -1713,6 +1718,104 @@ fn print_poll_summary(game: &GameState) {
             );
         }
     }
+}
+
+fn current_party_support(game: &GameState) -> Result<Vec<PartyTicket>, String> {
+    let candidates = game
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                candidate.party.to_string(),
+                candidate.name.clone(),
+                candidate.starting_share,
+                game.polls[index],
+            )
+        })
+        .collect::<Vec<_>>();
+    party_ticket_support(
+        &candidates,
+        game.candidates[game.player_index].party,
+        game.trust,
+        game.turnout_momentum,
+    )
+    .map_err(str::to_string)
+}
+
+fn print_party_support_table(game: &GameState) {
+    if game.region.is_some() {
+        println!(
+            "政黨票支持度：地方候選人選舉情境未另設政黨票；目前操控政黨為 {}。",
+            game.candidates[game.player_index].party
+        );
+        return;
+    }
+    println!("政黨票支持度（全國不分區遊戲情境，非實際民調）：");
+    match current_party_support(game) {
+        Ok(tickets) => {
+            for ticket in tickets {
+                let marker = if ticket.party == game.candidates[game.player_index].party {
+                    "▶ 玩家政黨"
+                } else {
+                    "　"
+                };
+                println!("  {marker}｜{}：{:.2}%", ticket.party, ticket.support_pct);
+            }
+        }
+        Err(error) => println!("  暫時無法計算政黨票情境：{error}"),
+    }
+}
+
+fn print_daily_poll_status(game: &GameState) {
+    let player = &game.candidates[game.player_index];
+    let player_share = game.polls[game.player_index];
+    let rival = game
+        .polls
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != game.player_index)
+        .max_by(|(_, left), (_, right)| left.total_cmp(right));
+    print!(
+        "【即時局勢】候選人支持度（對比式）：▶ {} {:.2}%",
+        player.name, player_share
+    );
+    if let Some((index, share)) = rival {
+        print!(
+            "｜目前最高競爭者 {} {:.2}%（差 {:+.2} 點）",
+            game.candidates[index].name,
+            share,
+            player_share - share
+        );
+    }
+    println!();
+    if game.region.is_some() {
+        println!(
+            "             政黨狀態：地方候選人制，未另設政黨票支持度｜玩家政黨 {}",
+            player.party
+        );
+    } else {
+        match current_party_support(game) {
+            Ok(tickets) => {
+                let player_party_share = tickets
+                    .iter()
+                    .find(|ticket| ticket.party == player.party)
+                    .map(|ticket| ticket.support_pct)
+                    .unwrap_or(0.0);
+                let leader = tickets
+                    .iter()
+                    .max_by(|left, right| left.support_pct.total_cmp(&right.support_pct));
+                if let Some(leader) = leader {
+                    println!(
+                        "             政黨票支持度（不分區情境）：▶ {} {:.2}%｜領先政黨 {} {:.2}%",
+                        player.party, player_party_share, leader.party, leader.support_pct
+                    );
+                }
+            }
+            Err(error) => println!("             政黨票支持度情境暫不可用：{error}"),
+        }
+    }
+    println!("             以上皆為遊戲內支持度狀態，不是實際民調或選舉預測。");
 }
 
 fn run_interactive(
@@ -1752,6 +1855,7 @@ fn run_interactive(
             game.exposed_tactics,
             game.sanctioned_funds
         );
+        print_daily_poll_status(game);
         if let Some(event) = game.current_event() {
             println!("議題焦點：{} — {}", event.title, event.description);
         }
@@ -1893,7 +1997,7 @@ fn confirm_end_campaign() -> Result<bool, String> {
 
 fn print_action_menu_help() {
     println!(
-        "\n行動方式：先選一個分類，再選行動；輸入 r 可執行策略引擎首選，p 可隨時查看支持度，? 可重看說明。分類內輸入 d 編號可先看行動描述與效果，數字則會直接執行；b 返回上一層。q 會先詢問是否提前結算。\n支持度預估是目前遊戲模型的一步期望，不是實際民調；每次每日行動都會推進一天。\n"
+        "\n行動方式：先選一個分類，再選行動；輸入 r 可執行策略引擎首選，p 可隨時查看支持度，? 可重看說明。分類內輸入 d 編號可先看行動描述與效果，數字則會直接執行；執行結果以 ✓【已選】標示，b 返回上一層。q 會先詢問是否提前結算。\n每日狀態分別列出候選人支持度與全國政黨票支持度；支持度預估是目前遊戲模型的一步期望，不是實際民調。每次每日行動都會推進一天，每週末附戰情回顧。\n"
     );
 }
 
@@ -2114,7 +2218,7 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
 fn print_staffer_outcome(game: &GameState, outcome: &StafferOutcome) {
     let candidate_name = &game.candidates[game.player_index].name;
     println!(
-        "✓ 幕僚決策｜{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
+        "✓【幕僚已選】{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
         outcome.title,
         candidate_name,
         outcome.support_before,
@@ -2156,7 +2260,7 @@ fn print_candidate_story_summary(game: &GameState) {
 fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
     let candidate_name = &game.candidates[game.player_index].name;
     println!(
-        "✓ {}｜{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
+        "✓【故事已選】{}｜{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
         outcome.title,
         outcome.choice_label,
         candidate_name,
@@ -3220,7 +3324,7 @@ fn print_action_outcome(
 ) {
     let candidate_name = &game.candidates[game.player_index].name;
     println!(
-        "✓ 第 {} 週・第 {} 天 [{}] {}：{} 支持度 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
+        "✓ 第 {} 週・第 {} 天 [{}]【已選】{}：{} 支持度 {:.2}% → {:.2}%（實際變化 {:+.2} 點；引擎預估 {:+.2} 點｜預算 -{}、週補給 +{}、餘額 {}）",
         outcome.week,
         outcome.day,
         outcome.category.label(),
@@ -3290,8 +3394,101 @@ fn print_action_outcome(
         println!("  候選人劇情：{}", candidate_action_reaction(outcome));
     }
     if outcome.day == DAYS_PER_WEEK {
+        print_weekly_campaign_review(game);
         print_poll_table(game);
     }
+}
+
+fn print_weekly_campaign_review(game: &GameState) {
+    let Some(report) = game.latest_weekly_report() else {
+        return;
+    };
+    println!("\n【第 {} 週戰情回顧｜遊戲模型值】", report.week);
+    for (index, candidate) in game.candidates.iter().enumerate() {
+        let ending = report.ending_polls.get(index).copied().unwrap_or(0.0);
+        let delta = report.candidate_deltas.get(index).copied().unwrap_or(0.0);
+        let marker = if index == game.player_index {
+            "▶"
+        } else {
+            " "
+        };
+        println!(
+            "{marker} {}：{ending:.2}%（本週 {delta:+.2} 點）",
+            candidate.name
+        );
+    }
+    if let Some((leader_index, leader_share)) = report
+        .ending_polls
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+    {
+        let player_share = report
+            .ending_polls
+            .get(game.player_index)
+            .copied()
+            .unwrap_or(0.0);
+        let margin = leader_share - player_share;
+        if margin.abs() < 0.005 {
+            println!("盤勢：玩家候選人與目前最高者並列。");
+        } else if leader_index == game.player_index {
+            println!(
+                "盤勢：玩家候選人目前居首；與次高者差 {:.2} 點。",
+                margin.max(0.0)
+            );
+        } else {
+            println!(
+                "盤勢：{} 暫居首位；玩家候選人落後 {:.2} 點。",
+                game.candidates[leader_index].name, margin
+            );
+        }
+    }
+    println!(
+        "團隊信任：{:.1}/100（本週 {:+.1}）；政府施政滿意度情境值：{:.1}/100（本週 {:+.1}）。",
+        report.ending_trust,
+        report.trust_delta,
+        report.ending_administration_approval,
+        report.administration_approval_delta
+    );
+    if !report.player_segment_deltas.is_empty() {
+        let strongest = report
+            .player_segment_deltas
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right));
+        let weakest = report
+            .player_segment_deltas
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.total_cmp(right));
+        if let (Some((up_index, up_delta)), Some((down_index, down_delta))) = (strongest, weakest) {
+            if up_index == down_index {
+                if let Some(segment) = game.voter_segments.get(up_index) {
+                    println!(
+                        "分眾變化：各遊戲原型接近持平，{} 約 {:+.2} 點（原型並非人口占比）。",
+                        segment.name, up_delta
+                    );
+                }
+            } else if let (Some(up_segment), Some(down_segment)) = (
+                game.voter_segments.get(up_index),
+                game.voter_segments.get(down_index),
+            ) {
+                println!(
+                    "分眾變化較大：{} {:+.2} 點；{} {:+.2} 點（遊戲原型，非人口占比）。",
+                    up_segment.name, up_delta, down_segment.name, down_delta
+                );
+            }
+        }
+    }
+    println!(
+        "本週任務「{}」：{}。支持度、分眾與施政滿意度均為遊戲狀態，不是實際民調或選舉預測。\n",
+        report.objective_title,
+        if report.objective_completed {
+            "已完成"
+        } else {
+            "未完成"
+        }
+    );
 }
 
 fn staffer_action_reaction(outcome: &project_twn::sim::ActionOutcome) -> &'static str {

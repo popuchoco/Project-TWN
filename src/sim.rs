@@ -1045,6 +1045,8 @@ pub struct GameState {
     weekly_objective_progress: u8,
     weekly_objective_completed: bool,
     objectives_completed: u8,
+    week_start_snapshot: CampaignWeekSnapshot,
+    weekly_reports: Vec<WeeklyCampaignReport>,
     action_uses: [u8; ActionId::COUNT],
     matched_events: u8,
     pub poll_taken_this_week: bool,
@@ -1053,6 +1055,29 @@ pub struct GameState {
     pub staffer_progress: StafferProgress,
     final_outcome: Option<ElectionOutcome>,
     rng: Rng,
+}
+
+#[derive(Clone, Debug)]
+struct CampaignWeekSnapshot {
+    polls: Vec<f64>,
+    player_segment_polls: Vec<f64>,
+    trust: f64,
+    administration_approval: f64,
+}
+
+/// A compact recap of a completed campaign week, in game-model units.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeeklyCampaignReport {
+    pub week: u8,
+    pub ending_polls: Vec<f64>,
+    pub candidate_deltas: Vec<f64>,
+    pub player_segment_deltas: Vec<f64>,
+    pub trust_delta: f64,
+    pub ending_trust: f64,
+    pub administration_approval_delta: f64,
+    pub ending_administration_approval: f64,
+    pub objective_title: &'static str,
+    pub objective_completed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1260,6 +1285,17 @@ impl GameState {
         self.polls = normalized;
         self.player_index = player_index;
         self.voter_segments = make_voter_segments(&self.polls);
+        self.week_start_snapshot = CampaignWeekSnapshot {
+            polls: self.polls.clone(),
+            player_segment_polls: self
+                .voter_segments
+                .iter()
+                .map(|segment| segment.polls[self.player_index])
+                .collect(),
+            trust: self.trust,
+            administration_approval: self.government_opinion.administration_approval,
+        };
+        self.weekly_reports.clear();
         self.final_outcome = None;
         self.validate()
     }
@@ -1478,6 +1514,15 @@ impl GameState {
             Side::Challenger => (50.0, 50.0),
         };
         let voter_segments = make_voter_segments(&polls);
+        let week_start_snapshot = CampaignWeekSnapshot {
+            polls: polls.clone(),
+            player_segment_polls: voter_segments
+                .iter()
+                .map(|segment| segment.polls[player_index])
+                .collect(),
+            trust,
+            administration_approval: GovernmentOpinion::default().administration_approval,
+        };
         let all_events = events_for_campaign(campaign_year);
         let events = setup.events(&all_events);
         let mut rng = Rng::new(seed);
@@ -1530,6 +1575,8 @@ impl GameState {
             weekly_objective_progress: 0,
             weekly_objective_completed: false,
             objectives_completed: 0,
+            week_start_snapshot,
+            weekly_reports: Vec::new(),
             action_uses: [0; ActionId::COUNT],
             matched_events: 0,
             poll_taken_this_week: false,
@@ -1982,6 +2029,10 @@ impl GameState {
         self.objectives_completed
     }
 
+    pub fn latest_weekly_report(&self) -> Option<&WeeklyCampaignReport> {
+        self.weekly_reports.last()
+    }
+
     pub fn apply_action(&mut self, id: ActionId) -> Result<ActionOutcome, GameError> {
         let action = self.action_spec(id)?;
         let preview = self.preview_action_for(action);
@@ -2155,8 +2206,43 @@ impl GameState {
             let before_funding = self.budget;
             self.budget = (self.budget + self.setup.difficulty.weekly_funding()).min(MAX_BUDGET);
             weekly_funding = self.budget - before_funding;
+            self.weekly_reports.push(WeeklyCampaignReport {
+                week,
+                ending_polls: self.polls.clone(),
+                candidate_deltas: self
+                    .polls
+                    .iter()
+                    .zip(&self.week_start_snapshot.polls)
+                    .map(|(ending, starting)| ending - starting)
+                    .collect(),
+                player_segment_deltas: self
+                    .voter_segments
+                    .iter()
+                    .zip(&self.week_start_snapshot.player_segment_polls)
+                    .map(|(segment, starting)| segment.polls[self.player_index] - starting)
+                    .collect(),
+                trust_delta: self.trust - self.week_start_snapshot.trust,
+                ending_trust: self.trust,
+                administration_approval_delta: self.government_opinion.administration_approval
+                    - self.week_start_snapshot.administration_approval,
+                ending_administration_approval: self.government_opinion.administration_approval,
+                objective_title: current_objective
+                    .map(|objective| objective.title)
+                    .unwrap_or("無週任務"),
+                objective_completed: self.weekly_objective_completed,
+            });
             self.round += 1;
             self.day = 0;
+            self.week_start_snapshot = CampaignWeekSnapshot {
+                polls: self.polls.clone(),
+                player_segment_polls: self
+                    .voter_segments
+                    .iter()
+                    .map(|segment| segment.polls[self.player_index])
+                    .collect(),
+                trust: self.trust,
+                administration_approval: self.government_opinion.administration_approval,
+            };
             self.poll_taken_this_week = false;
             self.coalition_this_week = false;
             self.weekly_objective_progress = 0;
@@ -3161,6 +3247,34 @@ mod tests {
         assert_eq!(left_titles.len(), CAMPAIGN_ROUNDS as usize);
         assert!(left_titles.windows(2).all(|pair| pair[0] != pair[1]));
         assert!(left.validate().is_ok());
+    }
+
+    #[test]
+    fn weekly_campaign_report_records_reproducible_model_deltas() {
+        let mut left = GameState::new(2024, Side::Incumbent, 5812);
+        let mut right = GameState::new(2024, Side::Incumbent, 5812);
+        assert!(left.latest_weekly_report().is_none());
+
+        for _ in 0..DAYS_PER_WEEK {
+            left.apply_action(ActionId::PolicyDelivery).unwrap();
+            right.apply_action(ActionId::PolicyDelivery).unwrap();
+        }
+
+        let report = left.latest_weekly_report().unwrap();
+        assert_eq!(report, right.latest_weekly_report().unwrap());
+        assert_eq!(report.week, 1);
+        assert_eq!(report.ending_polls.len(), left.candidates.len());
+        assert_eq!(
+            report.player_segment_deltas.len(),
+            left.voter_segments.len()
+        );
+        assert!((report.ending_polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
+        assert!(report.candidate_deltas.iter().sum::<f64>().abs() < 0.0001);
+        assert!(!report.objective_title.is_empty());
+
+        let completed_week = report.clone();
+        left.apply_action(ActionId::PolicyDelivery).unwrap();
+        assert_eq!(left.latest_weekly_report(), Some(&completed_week));
     }
 
     #[test]
