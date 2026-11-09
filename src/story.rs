@@ -99,19 +99,10 @@ impl Default for StoryMemory {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StoryProgress {
     decisions: [Option<StoryDecision>; 6],
     memory: StoryMemory,
-}
-
-impl Default for StoryProgress {
-    fn default() -> Self {
-        Self {
-            decisions: [None; 6],
-            memory: StoryMemory::default(),
-        }
-    }
 }
 
 impl StoryProgress {
