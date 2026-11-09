@@ -1,10 +1,10 @@
 use crate::campaign::{anniversary_day_offset, CampaignSetup, EventTimeline, DATED_EVENTS};
-use crate::governance::GovernmentOpinion;
-use crate::history::{
+use crate::game_content::{
     baseline_election, challenger_candidate_index, events_for_campaign, incumbent_candidate_index,
-    party_affinity, EventCard, Issue, PartyProfile, PresidentialElection, RegionProfile,
+    party_affinity, ElectionScenario, EventCard, Issue, PartyProfile, RegionProfile,
     VOTER_SEGMENTS,
 };
+use crate::governance::GovernmentOpinion;
 use crate::staffer::{
     brief_for_round as staffer_brief_for_round, continuity_bonus as staffer_continuity_bonus,
     StafferBrief, StafferDecision, StafferProgress,
@@ -1007,7 +1007,7 @@ fn find_campaign_action(side: Side, id: ActionId) -> Option<ActionSpec> {
 pub struct SimCandidate {
     pub name: String,
     pub party: &'static str,
-    pub historical_share: f64,
+    pub starting_share: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -1337,7 +1337,7 @@ impl GameState {
             model_parameters,
             setup,
         );
-        game.baseline_year = 2022;
+        game.baseline_year = 2024;
         game.region = Some(region);
         let (mut parties, shares) = local_slate(region);
         if let Some(selected_party) = selected_party {
@@ -1351,7 +1351,7 @@ impl GameState {
             .map(|(party, share)| SimCandidate {
                 name: format!("{party}（地方情境代表）"),
                 party,
-                historical_share: share,
+                starting_share: share,
             })
             .collect();
         game.polls = shares.to_vec();
@@ -1368,7 +1368,7 @@ impl GameState {
     fn from_election(
         campaign_year: u16,
         side: Side,
-        election: &'static PresidentialElection,
+        election: &'static ElectionScenario,
         seed: u64,
         style: CampaignStyle,
         model_parameters: ModelParameters,
@@ -1378,23 +1378,23 @@ impl GameState {
             Side::Incumbent => incumbent_candidate_index(election),
             Side::Challenger => challenger_candidate_index(election),
         };
-        let uses_historical_names = campaign_year == election.year;
+        let uses_scenario_names = campaign_year == election.year;
         let candidates: Vec<SimCandidate> = election
             .candidates
             .iter()
             .map(|result| SimCandidate {
-                name: if uses_historical_names {
+                name: if uses_scenario_names {
                     format!("{} / {}", result.president, result.vice_president)
                 } else {
                     format!("{}（情境代表）", result.party)
                 },
                 party: result.party,
-                historical_share: result.share_pct,
+                starting_share: result.share_pct,
             })
             .collect();
         let mut polls: Vec<f64> = candidates
             .iter()
-            .map(|candidate| candidate.historical_share)
+            .map(|candidate| candidate.starting_share)
             .collect();
         normalize(&mut polls);
         let (trust, turnout_momentum) = match side {
@@ -1414,7 +1414,7 @@ impl GameState {
                 let election_date = if campaign_year == election.year {
                     election.date
                 } else if campaign_year == 2026 {
-                    "2026-11-28"
+                    "2026-10-24"
                 } else {
                     election.date
                 };
@@ -2714,17 +2714,20 @@ fn is_field_action(id: ActionId) -> bool {
 
 fn local_slate(region: &RegionProfile) -> ([&'static str; 3], [f64; 3]) {
     match region.previous_winner_party {
-        "民進黨" => (
-            ["民主進步黨", "中國國民黨", "台灣民眾黨"],
+        "曙光民主聯盟" => (
+            ["曙光民主聯盟", "群島共治黨", "公民新聲黨"],
             [43.0, 37.0, 20.0],
         ),
-        "民眾黨" => (
-            ["台灣民眾黨", "民主進步黨", "中國國民黨"],
+        "海岳協作黨" => (
+            ["海岳協作黨", "曙光民主聯盟", "群島共治黨"],
             [39.0, 33.0, 28.0],
         ),
-        "無黨籍" => (["無黨籍", "中國國民黨", "民主進步黨"], [38.0, 34.0, 28.0]),
+        "地方共好聯盟" => (
+            ["地方共好聯盟", "群島共治黨", "社會同行黨"],
+            [38.0, 34.0, 28.0],
+        ),
         _ => (
-            ["中國國民黨", "民主進步黨", "台灣民眾黨"],
+            ["群島共治黨", "曙光民主聯盟", "公民新聲黨"],
             [43.0, 37.0, 20.0],
         ),
     }
@@ -2992,7 +2995,7 @@ mod tests {
         );
         assert_eq!(
             mapped.event_schedule[11].map(|event| event.title),
-            Some("三一九槍擊案與選後爭議")
+            Some("港區倉儲承攬資料疑義")
         );
         assert_eq!(mapped.event_schedule.len(), CAMPAIGN_ROUNDS as usize);
         assert!(mapped.validate().is_ok());
@@ -3014,6 +3017,53 @@ mod tests {
             .iter()
             .all(|event| crate::campaign::EventPack::Democracy.includes(event)));
         assert!(democracy.validate().is_ok());
+    }
+
+    #[test]
+    fn every_playable_scenario_can_map_at_least_one_fictional_date_anchor() {
+        for (year, election_date) in [
+            (1996, "1996-10-26"),
+            (2000, "2000-10-21"),
+            (2004, "2004-10-16"),
+            (2008, "2008-10-11"),
+            (2012, "2012-10-20"),
+            (2016, "2016-10-15"),
+            (2020, "2020-10-17"),
+            (2024, "2024-10-12"),
+            (2026, "2026-10-24"),
+        ] {
+            let schedule =
+                make_anniversary_event_schedule(&events_for_campaign(year), election_date);
+            assert!(
+                schedule.iter().any(Option::is_some),
+                "fictional date mapping has no events for scenario year {year}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_fictional_date_anchor_matches_an_event_and_a_playable_campaign_window() {
+        for anchor in DATED_EVENTS {
+            let event = crate::game_content::EVENTS
+                .iter()
+                .find(|event| event.title == anchor.title)
+                .unwrap_or_else(|| panic!("unmatched date anchor: {}", anchor.title));
+            let maps_to_active_cycle = event.active_campaign_years.iter().any(|year| {
+                let election_date = if *year == 2026 {
+                    Some("2026-10-24")
+                } else {
+                    crate::game_content::election_for_year(*year).map(|election| election.date)
+                };
+                election_date
+                    .and_then(|date| anniversary_day_offset(anchor.date, date))
+                    .is_some()
+            });
+            assert!(
+                maps_to_active_cycle,
+                "date anchor does not reach an active cycle: {}",
+                anchor.title
+            );
+        }
     }
 
     #[test]
@@ -3121,7 +3171,7 @@ mod tests {
 
     #[test]
     fn local_scenario_uses_region_context_and_three_party_polls() {
-        let region = crate::history::find_region("臺北市").unwrap();
+        let region = crate::game_content::find_region("霧川市").unwrap();
         let game = GameState::new_local_with_style(
             2026,
             Side::Challenger,
@@ -3129,7 +3179,7 @@ mod tests {
             CampaignStyle::Organizer,
             region,
         );
-        assert_eq!(game.region.unwrap().name, "臺北市");
+        assert_eq!(game.region.unwrap().name, "霧川市");
         assert_eq!(game.candidates.len(), 3);
         assert_eq!(game.player_index, 1);
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 0.0001);
@@ -3137,7 +3187,7 @@ mod tests {
 
     #[test]
     fn multi_candidate_poll_coordination_produces_a_report() {
-        let region = crate::history::find_region("新竹市").unwrap();
+        let region = crate::game_content::find_region("雲棲市").unwrap();
         let mut game = GameState::new_local_with_style(
             2026,
             Side::Challenger,
@@ -3153,8 +3203,8 @@ mod tests {
 
     #[test]
     fn third_party_candidate_can_negotiate_a_coalition_once_per_week() {
-        let region = crate::history::find_region("臺北市").unwrap();
-        let party = crate::history::find_party("新黨").unwrap();
+        let region = crate::game_content::find_region("霧川市").unwrap();
+        let party = crate::game_content::find_party("山海自治黨").unwrap();
         let mut game = GameState::new_local_with_party(
             2026,
             Side::Challenger,
@@ -3163,7 +3213,7 @@ mod tests {
             region,
             Some(party),
         );
-        assert_eq!(game.candidates[game.player_index].party, "新黨");
+        assert_eq!(game.candidates[game.player_index].party, "山海自治黨");
         let outcome = game.apply_action(ActionId::CoalitionTalks).unwrap();
         assert!(outcome.coordination_note.is_some());
         assert!(game.apply_action(ActionId::CoalitionTalks).is_err());

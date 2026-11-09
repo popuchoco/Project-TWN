@@ -45,7 +45,7 @@ jobs:
 
       - name: Smoke-test paired parameter sensitivity
         run: |
-          cargo run -- --batch 2 --year 2026 --region 臺北市 --role challenger --seed 77 --sensitivity --batch-log target/ci-sensitivity-runs.tsv
+          cargo run -- --batch 2 --year 2026 --region 霧川市 --role challenger --seed 77 --sensitivity --batch-log target/ci-sensitivity-runs.tsv
           $rows = @(Get-Content target/ci-sensitivity-runs.tsv)
           if ($rows.Count -ne 31) { throw "Expected a header and 30 one-factor rows; got $($rows.Count)." }
           foreach ($row in $rows) {
@@ -54,7 +54,7 @@ jobs:
 
       - name: Smoke-test paired parameter interaction sensitivity
         run: |
-          cargo run -- --batch 1 --year 2026 --region 臺北市 --role challenger --seed 77 --interaction-sensitivity --batch-log target/ci-interaction-runs.tsv
+          cargo run -- --batch 1 --year 2026 --region 霧川市 --role challenger --seed 77 --interaction-sensitivity --batch-log target/ci-interaction-runs.tsv
           $rows = @(Get-Content target/ci-interaction-runs.tsv)
           if ($rows.Count -ne 85) { throw "Expected a header and 84 two-factor corner rows; got $($rows.Count)." }
           foreach ($row in $rows) {
@@ -98,10 +98,10 @@ jobs:
           if (-not $advice.Contains("中立選戰")) { throw "Interactive action list omitted neutral tactics." }
           if (-not $advice.Contains("負面／高風險選戰")) { throw "Interactive action list omitted negative tactics." }
           if (-not $advice.Contains("預估揭露")) { throw "Interactive action list omitted exposure forecasts." }
-          if (-not $advice.Contains("本場玩家身分") -or -not $advice.Contains("玩家操控：侯友宜 / 趙少康")) { throw "Opening screen omitted the assigned player candidate." }
-          if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("柯文哲 / 吳欣盈")) { throw "Opening screen omitted the opponent roster." }
+          if (-not $advice.Contains("本場玩家身分") -or -not $advice.Contains("玩家操控：沈知行 / 葉以棠")) { throw "Opening screen omitted the assigned player candidate." }
+          if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("林沐青 / 江予禾")) { throw "Opening screen omitted the opponent roster." }
           if (-not $advice.Contains("政府施政滿意度情境值") -or -not $advice.Contains("議題焦點")) { throw "Opening screen did not show the separate government and issue indicators." }
-          if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「侯友宜 / 趙少康")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
+          if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「沈知行 / 葉以棠")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
           if ($advice.Contains("分眾支持度（原型權重")) { throw "Opening snapshot should keep voter-segment detail behind the poll lookup." }
           if (-not $advice.Contains("行動詳情｜") -or -not $advice.Contains("推薦理由：")) { throw "Interactive action details omitted explanations." }
           if (-not $advice.Contains("結束本場並立即結算？")) { throw "Early exit did not ask for confirmation." }
@@ -126,6 +126,36 @@ jobs:
           if ($values[[Array]::IndexOf($headers, "difficulty")] -ne "hard") { throw "Difficulty was not recorded." }
           if ($values[[Array]::IndexOf($headers, "event_pack")] -ne "democracy") { throw "Event pack was not recorded." }
           if ($values[[Array]::IndexOf($headers, "timeline")] -ne "date") { throw "Timeline was not recorded." }
+
+      - name: Guard fictional player-facing content
+        run: |
+          cargo run -- --scenarios | Out-File -Encoding utf8 target/ci-scenarios.txt
+          cargo run -- --history | Out-File -Encoding utf8 target/ci-history-alias.txt
+          cargo run -- --regions | Out-File -Encoding utf8 target/ci-regions.txt
+          cargo run -- --parties | Out-File -Encoding utf8 target/ci-parties.txt
+          cargo run -- --year 2024 --role challenger --auto --seed 14 | Out-File -Encoding utf8 target/ci-fictional-campaign.txt
+          cargo run -- --recall --recall-side initiator --recall-template synthetic --auto --seed 15 | Out-File -Encoding utf8 target/ci-fictional-recall.txt
+          @("2", "3", "q", "y") | cargo run -- --recall | Out-File -Encoding utf8 target/ci-recall-target-selection.txt
+          cargo run -- --help | Out-File -Encoding utf8 target/ci-fictional-help.txt
+          cargo run -- --year 2024 --role challenger --auto --seed 14 --log target/ci-fictional-campaign.tsv | Out-File -Encoding utf8 target/ci-fictional-campaign-log-console.txt
+          cargo run -- --batch 1 --year 2024 --role challenger --seed 14 --batch-log target/ci-fictional-batch.tsv | Out-File -Encoding utf8 target/ci-fictional-batch-console.txt
+          $scenario = Get-Content target/ci-scenarios.txt -Raw
+          if (-not $scenario.Contains("虛構選戰情境年表") -or -not $scenario.Contains("林沐青")) { throw "Scenario catalog did not identify its synthetic setting." }
+          if ((Get-Content target/ci-history-alias.txt -Raw) -ne $scenario) { throw "The legacy scenario flag diverges from the fictional catalog." }
+          $targetSelection = Get-Content target/ci-recall-target-selection.txt -Raw
+          if (-not $targetSelection.Contains("請輸入 1–4") -or -not $targetSelection.Contains("卓聞川") -or -not $targetSelection.Contains("玩家陣營：反對罷免方")) { throw "Recall setup did not expose target selection and assignment." }
+          $outputs = @($scenario, (Get-Content target/ci-history-alias.txt -Raw), (Get-Content target/ci-regions.txt -Raw), (Get-Content target/ci-parties.txt -Raw), (Get-Content target/ci-fictional-campaign.txt -Raw), (Get-Content target/ci-fictional-recall.txt -Raw), (Get-Content target/ci-recall-target-selection.txt -Raw), (Get-Content target/ci-fictional-help.txt -Raw), (Get-Content target/ci-fictional-campaign.tsv -Raw), (Get-Content target/ci-fictional-batch.tsv -Raw))
+          $forbidden = @(
+            "陳水扁", "馬英九", "蔡英文", "賴清德", "柯文哲", "侯友宜", "韓國瑜", "黃國昌", "王浩宇", "陳柏惟",
+            "羅淑蕾", "李新", "林益世", "彭文正", "黃安", "周子瑜", "施明德", "洪仲丘", "陳雲林",
+            "中國國民黨", "民主進步黨", "台灣民眾黨", "親民黨", "新黨", "時代力量", "社會民主黨", "台灣團結聯盟", "勞動黨", "台灣綠黨", "民國黨", "國會政黨聯盟",
+            "三一九槍擊案", "太陽花學運", "野百合學運", "反送中", "雨傘運動", "COVID-19", "ECFA", "反課綱", "反媒體壟斷", "紅衫軍"
+          )
+          foreach ($output in $outputs) {
+            foreach ($term in $forbidden) {
+              if ($output.Contains($term)) { throw "Player-facing output leaked a non-fictional reference: $term" }
+            }
+          }
 
       - name: Smoke-test story path and campaign TSV
         run: |

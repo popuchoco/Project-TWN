@@ -1,6 +1,6 @@
 pub mod campaign;
+pub mod game_content;
 pub mod governance;
-pub mod history;
 pub mod primary;
 pub mod recall;
 pub mod sim;

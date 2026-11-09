@@ -1,9 +1,9 @@
 use project_twn::campaign::{CampaignDifficulty, CampaignSetup, EventPack, EventTimeline};
-use project_twn::governance::issue_label;
-use project_twn::history::{
+use project_twn::game_content::{
     find_party, find_region, PartyProfile, RegionProfile, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS,
     PARTY_PROFILES, REGIONS, VOTER_SEGMENTS,
 };
+use project_twn::governance::issue_label;
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::recall::{
     RecallActionId, RecallEnding, RecallPhase, RecallSide, RecallState, RecallTemplate,
@@ -44,7 +44,7 @@ struct Options {
     strategy: StrategyProfile,
     seed: u64,
     auto: bool,
-    history: bool,
+    show_scenarios: bool,
     list_regions: bool,
     list_parties: bool,
     region: Option<String>,
@@ -55,6 +55,7 @@ struct Options {
     recall_mode: bool,
     recall_side: Option<RecallSide>,
     recall_template: RecallTemplate,
+    recall_template_selected: bool,
     log: Option<String>,
     batch: Option<u32>,
     sweep_styles: bool,
@@ -167,8 +168,8 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_args()?;
-    if options.history {
-        print_history();
+    if options.show_scenarios {
+        print_scenarios();
         return Ok(());
     }
     if options.list_regions {
@@ -199,7 +200,12 @@ fn run() -> Result<(), String> {
             None if options.auto => RecallSide::Initiator,
             None => ask_recall_side()?,
         };
-        let mut game = RecallState::new(options.recall_template, side, options.seed);
+        let template = if options.auto || options.recall_template_selected {
+            options.recall_template
+        } else {
+            ask_recall_template()?
+        };
+        let mut game = RecallState::new(template, side, options.seed);
         print_recall_intro(&game);
         if options.auto {
             run_recall_auto(&mut game);
@@ -305,7 +311,7 @@ fn resolve_scenario(
         None => None,
     };
     if region.is_some() && options.year != 2026 {
-        return Err("地方首長模式目前是 2026 前瞻情境，請使用 --year 2026。".to_string());
+        return Err("地方選舉模式目前以 2026 年情境進行，請使用 --year 2026。".to_string());
     }
     let selected_party = match options.party.as_deref() {
         Some(query) => Some(
@@ -322,7 +328,7 @@ fn resolve_scenario(
             .map(|profile| profile.name)
             .unwrap_or(region.previous_winner_party);
         if role == Side::Incumbent && party.name != previous_party {
-            return Err("執政方 --party 必須符合該地 2022 上屆首長政黨；若扮演其他政黨請選 --role challenger。".to_string());
+            return Err("執政方 --party 必須符合該虛構地區的上一輪情境執政黨；若扮演其他政黨請選 --role challenger。".to_string());
         }
     }
     Ok((region, selected_party))
@@ -364,7 +370,7 @@ fn parse_args() -> Result<Options, String> {
         strategy: StrategyProfile::Balanced,
         seed: 2026,
         auto: false,
-        history: false,
+        show_scenarios: false,
         list_regions: false,
         list_parties: false,
         region: None,
@@ -375,6 +381,7 @@ fn parse_args() -> Result<Options, String> {
         recall_mode: false,
         recall_side: None,
         recall_template: RecallTemplate::Synthetic,
+        recall_template_selected: false,
         log: None,
         batch: None,
         sweep_styles: false,
@@ -389,7 +396,7 @@ fn parse_args() -> Result<Options, String> {
                 print_usage();
                 std::process::exit(0);
             }
-            "--history" => options.history = true,
+            "--history" | "--scenarios" => options.show_scenarios = true,
             "--regions" => options.list_regions = true,
             "--parties" => options.list_parties = true,
             "--auto" | "--demo" => options.auto = true,
@@ -409,6 +416,7 @@ fn parse_args() -> Result<Options, String> {
                 options.recall_template = RecallTemplate::parse(&value).ok_or_else(|| {
                     format!("未知罷免情境盤型：{value}；可選 fictional、low-turnout、concentrated、high-mobilization")
                 })?;
+                options.recall_template_selected = true;
             }
             "--region" => {
                 options.region = Some(
@@ -640,17 +648,53 @@ fn ask_recall_side() -> Result<RecallSide, String> {
     }
 }
 
+fn ask_recall_template() -> Result<RecallTemplate, String> {
+    loop {
+        println!("\n選擇罷免目標與選區盤型（皆為虛構情境）：");
+        for (index, template) in RecallTemplate::ALL.iter().copied().enumerate() {
+            println!(
+                "  {}) {}｜{}（{}）｜焦點：{}",
+                index + 1,
+                template.label(),
+                template.target_name(),
+                template.district_name(),
+                template.constituency_issue()
+            );
+        }
+        print!("請輸入 1–4：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?;
+        if let Ok(selection) = input.trim().parse::<usize>() {
+            if let Some(index) = selection.checked_sub(1) {
+                if let Some(template) = RecallTemplate::ALL.get(index) {
+                    return Ok(*template);
+                }
+            }
+        }
+        println!("請輸入 1–4 其中一個選項。\n");
+    }
+}
+
 fn print_recall_intro(game: &RecallState) {
     println!("\n=== 人民罷免戰役｜Project-TWN ===");
     println!(
-        "虛構罷免目標：區域立法委員 {}　｜虛構選區：{}\n情境盤型：{}　玩家陣營：{}　選舉人：{}　隨機種子：固定可重現",
+        "虛構罷免目標：區域立法委員 {}（{}）　｜虛構選區：{}\n情境盤型：{}　玩家陣營：{}　選舉人：{}　隨機種子：固定可重現",
         game.template.target_name(),
+        game.template.target_party(),
         game.template.district_name(),
         game.template.label(),
         game.player_side.label(),
         game.electorate
     );
     println!("{}", game.template.briefing());
+    println!(
+        "選區議題：{}　｜目標公共服務紀錄：{:.1}/100（遊戲狀態，會隨答辯或查證改變）",
+        game.template.constituency_issue(),
+        game.target_record
+    );
     println!("僅模擬人民依法發動的罷免；不納入彈劾。所有人物、選區與盤勢均為虛構情境，不是歷史個案重演、實際民調或因果結論。");
     println!(
         "法定門檻：提議 {} 人（1%）→有效連署 {} 人（10%）→同意票至少 {} 人（1/4），且多於不同意票。",
@@ -676,6 +720,10 @@ fn print_recall_status(game: &RecallState) {
         game.current_days_limit(),
         game.blocks_elapsed,
         game.current_block_limit()
+    );
+    println!(
+        "目標公共服務紀錄 {:.1}/100　｜罷免方信任 {:.1}　｜反罷免方信任 {:.1}",
+        game.target_record, game.initiator_trust, game.opposition_trust
     );
     match game.phase {
         RecallPhase::Proposal => println!(
@@ -886,18 +934,20 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
         );
     } else {
         println!(
-            "選舉基準：{} 年總統選舉，初始候選人支持度以該屆實際得票率為起點，不是當時民調。",
+            "選舉基準：{} 年虛構總統情境；起始支持度是本作設定值，不是實際得票率或民調。",
             game.baseline_year
         );
     }
     if game.region.is_none() && game.campaign_year != game.baseline_year {
-        println!("注意：本場使用政黨情境代表，不是該年度的實際候選人；支持度沿用最近一次總統票作遊戲起點，不代表當期民調或選舉結果。");
+        println!("注意：本場使用政黨情境代表；起始支持度沿用最近一組虛構選戰設定，不代表當期民調或選舉結果。");
     }
     if game.campaign_year == 2026 {
         if game.region.is_some() {
-            println!("2026地方選舉模式：2022年各地上屆首長政黨作為基準情境；2026投票日為 11-28，截至 11-08 尚無開票結果。" );
+            println!("2026 地方選舉模式：沿用虛構地方情境的上一輪執政聯盟與支持設定；本作投票日為 10-24。" );
         } else {
-            println!("2026全國代理情境：以2024總統票作全國基準，不是地方候選人或縣市民調；地方投票日為 2026-11-28。" );
+            println!(
+                "2026 全國選戰情境：以 2024 年虛構選戰設定作為支持度基準；不是實際候選人或民調。"
+            );
         }
     }
     println!("競選期：{CAMPAIGN_ROUNDS} 週 × {DAYS_PER_WEEK} 天，共 {} 個每日決策（布局／議題攻防／決戰三階段）；起始預算：{}　團隊信任：{:.1}/100　體力：{:.1}/100", CAMPAIGN_ROUNDS as u16 * DAYS_PER_WEEK as u16, game.budget, game.trust, game.stamina);
@@ -935,7 +985,7 @@ fn print_player_assignment(game: &GameState) {
     let context = if game.region.is_some() {
         "地方政黨情境代表"
     } else if game.campaign_year == game.baseline_year {
-        "歷史選舉候選人"
+        "年度虛構選戰候選人"
     } else {
         "全國政黨情境代表"
     };
@@ -970,7 +1020,7 @@ fn print_poll_table(game: &GameState) {
             "{marker} {:<22} {:>5.2}%（較起始盤 {:+.2}） {bar}",
             candidate.name,
             game.polls[index],
-            game.polls[index] - candidate.historical_share
+            game.polls[index] - candidate.starting_share
         );
     }
     println!("分眾支持度（原型權重／{player_name} 支持度）— 僅供觀察遊戲模型：");
@@ -1025,7 +1075,7 @@ fn print_poll_summary(game: &GameState) {
             "{marker} {}：{:.2}%（較起始盤 {:+.2} 點）",
             candidate.name,
             game.polls[index],
-            game.polls[index] - candidate.historical_share
+            game.polls[index] - candidate.starting_share
         );
     }
     let opinion = &game.government_opinion;
@@ -1368,7 +1418,7 @@ fn print_staffer_poll_brief(game: &GameState) {
         "  {}：{:.2}%（相對起始盤 {:+.2} 點）",
         player.name,
         player_share,
-        player_share - player.historical_share
+        player_share - player.starting_share
     );
     if let Some((index, candidate)) = rival {
         println!(
@@ -2836,7 +2886,7 @@ fn print_primary_polls(primary: &PrimaryContest) {
 }
 
 fn print_regions() {
-    println!("可選地方情境（上屆首長政黨依 2022 地方選舉；議題標籤是遊戲情境設定）\n");
+    println!("可選虛構地方情境（政黨、地名與前輪支持設定皆為遊戲內容）\n");
     for (index, region) in REGIONS.iter().enumerate() {
         println!(
             "  {:>2}. {:<5} {:<8} 上屆：{}　焦點：{}",
@@ -2850,14 +2900,14 @@ fn print_regions() {
 }
 
 fn print_parties() {
-    println!("可選第三勢力／政黨情境範本（不代表每一黨都會參加2026年選舉；軸線是策略參數）\n");
+    println!("可選政黨／地方聯盟情境範本（名稱、描述與策略軸線均為虛構遊戲設定）\n");
     for party in PARTY_PROFILES {
         println!(
             "  {:<12} {:<18} {}",
             party.name, party.camp, party.description
         );
     }
-    println!("\n地方模式使用：--year 2026 --region 縣市 --role challenger --party 政黨名稱");
+    println!("\n地方模式使用：--year 2026 --region 地區 --role challenger --party 政黨名稱");
 }
 
 fn save_campaign_log(
@@ -2944,11 +2994,11 @@ fn save_campaign_log(
     Ok(())
 }
 
-fn print_history() {
-    println!("臺灣總統副總統直選結果（中選會資料；列出得票率）\n");
+fn print_scenarios() {
+    println!("虛構選戰情境年表（人物、政黨、地名、票數與事件皆為本作設定；非史實或預測）\n");
     for election in ELECTIONS {
         println!(
-            "{} ({})　當時執政黨：{}",
+            "{} ({})　情境執政黨：{}",
             election.year, election.date, election.incumbent_party
         );
         for candidate in election.candidates {
@@ -2958,24 +3008,22 @@ fn print_history() {
             );
         }
     }
-    println!("\n立法院關鍵席次節點");
+    println!("\n虛構議會席次情境");
     for snapshot in LEGISLATURE_SNAPSHOTS {
         println!("  {}：{}", snapshot.year, snapshot.summary);
     }
-    println!("\n近代臺灣選戰與社會事件（事件說明為背景摘要，不是單一因果判斷）");
+    println!("\n公共議題事件卡（角色與事件皆為虛構情境）");
     for event in EVENTS {
         println!("  {}｜{}：{}", event.year, event.title, event.description);
     }
-    println!("\n選民原型（遊戲權重，不是實際人口占比）");
+    println!("\n選民原型（遊戲權重，不是人口統計或實際占比）");
     for segment in VOTER_SEGMENTS {
         println!(
             "  {:<20} {:>4.0}%｜{}",
             segment.name, segment.weight_pct, segment.description
         );
     }
-    println!(
-        "\n2026：地方公職人員選舉投票日為 2026-11-28；截至 2026-11-08 尚未投票，故不列結果。\n"
-    );
+    println!("\n所有年表票數及比例均為遊戲參數，玩家可見人物、團體與事件不對應特定真實對象。\n");
 }
 
 fn print_usage() {
@@ -2983,34 +3031,34 @@ fn print_usage() {
         "Project-TWN — 臺灣選戰模擬器
 
 使用方式：
-  project-twn --history
+  project-twn --scenarios [--history 相容別名]
   project-twn --regions
   project-twn --parties
   project-twn --recall [--recall-side initiator|opposition] [--recall-template fictional|low-turnout|concentrated|high-mobilization] [--seed 整數] [--auto]
-  project-twn --simulate [年份] [--region 縣市] [--party 政黨] [--role incumbent|challenger]
+  project-twn --simulate [年份] [--region 地區] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable|hardball]
       [--difficulty story|standard|hard] [--event-pack all|democracy|cross-strait|local|media] [--timeline weekly|date]
       [--primary | --staffer] [--seed 整數] [--auto] [--log 檔案.tsv]
   project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--strategy 策略]
       [--sweep-styles | --sweep-strategies | --sensitivity | --interaction-sensitivity]
-      [--year 年份] [--region 縣市] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
+      [--year 年份] [--region 地區] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
 
 範例：
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
   cargo run -- --simulate 2024 --role challenger --difficulty story --event-pack democracy --timeline date
   cargo run -- --year 2024 --role challenger --staffer --seed 42
   cargo run -- --recall --recall-side initiator --recall-template high-mobilization --seed 42
-  cargo run -- --year 2026 --region 臺北市 --role challenger --party 時代力量 --strategy issue --seed 7 --auto
+  cargo run -- --year 2026 --region 霧川市 --role challenger --party 山海自治黨 --strategy issue --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sweep-strategies --batch-log strategy.tsv
   cargo run -- --batch 100 --year 2024 --role challenger --seed 1000 --sensitivity --batch-log sensitivity.tsv
   cargo run -- --batch 10 --year 2024 --role challenger --seed 1000 --interaction-sensitivity --batch-log interactions.tsv
 
-年份範圍：1996–2026。地方模式可用 --regions 檢視 22 個縣市；--parties 檢視政黨範本。
+年份範圍：1996–2026。--scenarios 顯示虛構年表與事件卡（--history 為相容別名）；地方模式可用 --regions 檢視 22 個虛構地區，--parties 檢視虛構政黨範本。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 --staffer 開啟幕僚模式：設定競選主軸，並在六個關鍵週處理陳情、地方協調、事件回應、支持度檢視與最後布局；幕僚決策不占每日行動，但會消耗預算及影響遊戲資源。此單場模式目前不支援 --batch 或 --primary。
 --recall 開啟人民罷免模式：在罷免提議／連署方或反對罷免方之間選擇，進行 14 日提議、60 日連署與 28 日投票宣傳；可選虛構的低投票參與、集中支持或高強度動員盤型。本模式不含彈劾；遊戲中人物與事件皆採虛構合成，不對應真實對象。不實／死亡連署是違規高風險行動，不計入有效連署，遭查核會受遊戲內懲處。
-難度可選故事／標準／挑戰；事件包可篩選民主化、兩岸、地方民生或媒體信任議題；--timeline date 會將有日期錨點的事件周年映射到 12 週戰役日曆，沒有錨點的週次留白。這是可切換的遊戲排程，不表示史實在遊戲年份重演。
+難度可選故事／標準／挑戰；事件包可篩選制度參與、區域安全、地方民生或媒體信任等虛構議題；--timeline date 會將虛構事件的遊戲日期錨點映射到 12 週戰役日曆，沒有錨點的週次留白。
 省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。
 --strategy 選擇七種權重組合，互動模式顯示行動分類、排序及預估揭露風險，--auto 依排序採取行動。

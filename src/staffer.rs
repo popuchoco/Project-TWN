@@ -3,7 +3,7 @@
 //! Characters and situations are fictional composites. Historical event cards
 //! can contextualize a briefing, but they do not determine a party's benefit.
 
-use crate::history::Issue;
+use crate::game_content::Issue;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CampaignFocus {

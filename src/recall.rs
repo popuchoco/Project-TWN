@@ -40,6 +40,13 @@ pub enum RecallTemplate {
 }
 
 impl RecallTemplate {
+    pub const ALL: [Self; 4] = [
+        Self::Synthetic,
+        Self::LowTurnoutThreshold,
+        Self::ConcentratedSupport,
+        Self::HighMobilization,
+    ];
+
     pub const fn target_name(self) -> &'static str {
         match self {
             Self::Synthetic => "林嶼衡",
@@ -55,6 +62,33 @@ impl RecallTemplate {
             Self::LowTurnoutThreshold => "望洲縣南澗區",
             Self::ConcentratedSupport => "青汀市河岫區",
             Self::HighMobilization => "遙港市秋原區",
+        }
+    }
+
+    pub const fn target_party(self) -> &'static str {
+        match self {
+            Self::Synthetic => "群島共治黨",
+            Self::LowTurnoutThreshold => "海岳協作黨",
+            Self::ConcentratedSupport => "曙光民主聯盟",
+            Self::HighMobilization => "公民新聲黨",
+        }
+    }
+
+    pub const fn constituency_issue(self) -> &'static str {
+        match self {
+            Self::Synthetic => "港區公車班距與人行動線",
+            Self::LowTurnoutThreshold => "農產轉運與雨季接駁",
+            Self::ConcentratedSupport => "校園整修排序與公共資訊",
+            Self::HighMobilization => "外圍社區醫療接駁與服務回訪",
+        }
+    }
+
+    pub const fn target_record(self) -> f64 {
+        match self {
+            Self::Synthetic => 48.0,
+            Self::LowTurnoutThreshold => 55.0,
+            Self::ConcentratedSupport => 42.0,
+            Self::HighMobilization => 61.0,
         }
     }
 
@@ -368,6 +402,8 @@ pub struct RecallState {
     pub no_mobilization: f64,
     pub initiator_trust: f64,
     pub opposition_trust: f64,
+    /// In-game rating of the target's constituency service record.
+    pub target_record: f64,
     pub volunteer_capacity: f64,
     pub signature_headwind: f64,
     pub audit_pressure: f64,
@@ -415,6 +451,7 @@ impl RecallState {
             no_mobilization,
             initiator_trust: 50.0,
             opposition_trust: 50.0,
+            target_record: template.target_record(),
             volunteer_capacity: 18.0,
             signature_headwind: 0.0,
             audit_pressure: 0.0,
@@ -677,6 +714,7 @@ impl RecallState {
             (RecallSide::Initiator, RecallActionId::EvidenceBriefing) => {
                 self.initiator_trust = (self.initiator_trust + 3.0 * repeat_factor).min(100.0);
                 self.increase_yes_intention(0.85 * repeat_factor);
+                self.target_record = (self.target_record - 1.4 * repeat_factor).max(0.0);
                 self.signature_quality = (self.signature_quality + 0.015).min(0.995);
                 if self.phase == RecallPhase::Proposal {
                     self.proposal_count = self.proposal_count.saturating_add(
@@ -739,6 +777,7 @@ impl RecallState {
                 self.yes_intention_pct = (self.yes_intention_pct - 0.65 * repeat_factor).max(0.0);
                 self.increase_no_intention(0.8 * repeat_factor);
                 self.opposition_trust = (self.opposition_trust + 2.0).min(100.0);
+                self.target_record = (self.target_record + 1.2 * repeat_factor).min(100.0);
                 self.signature_headwind += 0.10;
                 "答辯逐項對照罷免理由與公開紀錄；未能解答的部分成為新的追問。".to_string()
             }
@@ -746,6 +785,7 @@ impl RecallState {
                 self.increase_no_intention(0.45 * repeat_factor);
                 self.no_mobilization = (self.no_mobilization + 2.0).min(100.0);
                 self.opposition_trust = (self.opposition_trust + 1.6).min(100.0);
+                self.target_record = (self.target_record + 2.0 * repeat_factor).min(100.0);
                 self.signature_headwind += 0.06;
                 "團隊公開地方服務進度並回訪陳情個案，尚未完成的事項列出後續期限。".to_string()
             }
@@ -958,6 +998,7 @@ impl RecallState {
             self.no_mobilization,
             self.initiator_trust,
             self.opposition_trust,
+            self.target_record,
             self.volunteer_capacity,
         ] {
             if !value.is_finite() || !(0.0..=100.0).contains(&value) {
@@ -1029,22 +1070,39 @@ mod tests {
 
     #[test]
     fn recall_scenarios_use_distinct_fictional_targets_and_districts() {
-        let templates = [
-            RecallTemplate::Synthetic,
-            RecallTemplate::LowTurnoutThreshold,
-            RecallTemplate::ConcentratedSupport,
-            RecallTemplate::HighMobilization,
-        ];
+        let templates = RecallTemplate::ALL;
+        assert_eq!(templates.len(), 4);
         let names = templates.map(RecallTemplate::target_name);
         let districts = templates.map(RecallTemplate::district_name);
+        let parties = templates.map(RecallTemplate::target_party);
         assert!(names.iter().all(|name| !name.trim().is_empty()));
         assert!(districts.iter().all(|district| !district.trim().is_empty()));
         for index in 0..templates.len() {
             for other in index + 1..templates.len() {
                 assert_ne!(names[index], names[other]);
                 assert_ne!(districts[index], districts[other]);
+                assert_ne!(parties[index], parties[other]);
             }
         }
+    }
+
+    #[test]
+    fn recall_target_profile_changes_with_evidence_and_public_defense() {
+        let mut initiator = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 100);
+        let baseline = initiator.target_record;
+        initiator
+            .apply_action(RecallActionId::EvidenceBriefing)
+            .unwrap();
+        assert!(initiator.target_record < baseline);
+
+        let mut opposition =
+            RecallState::new(RecallTemplate::Synthetic, RecallSide::Opposition, 100);
+        let baseline = opposition.target_record;
+        opposition
+            .apply_action(RecallActionId::PublicDefense)
+            .unwrap();
+        assert!(opposition.target_record > baseline);
+        assert!(opposition.validate().is_ok());
     }
 
     #[test]

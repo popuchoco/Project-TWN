@@ -3,7 +3,7 @@
 //! These settings select playable content and difficulty; they are not
 //! historical accuracy parameters or election forecasts.
 
-use crate::history::{EventCard, Issue};
+use crate::game_content::{EventCard, Issue};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CampaignDifficulty {
@@ -144,7 +144,7 @@ impl EventTimeline {
     pub fn label(self) -> &'static str {
         match self {
             Self::SeededWeekly => "固定種子週次排程",
-            Self::AnniversaryMapped => "事件周年日期映射",
+            Self::AnniversaryMapped => "虛構日期錨點映射",
         }
     }
 }
@@ -172,71 +172,66 @@ pub struct DatedEvent {
     pub date: &'static str,
 }
 
-/// Curated date anchors for optional anniversary mapping. The campaign clock
-/// is a game calendar; mapping an anniversary to a week does not claim that
-/// the historical event happened again in the scenario year.
+/// Curated fictional date anchors for optional campaign-calendar mapping.
+/// Dates select a week in the game calendar and do not represent real events.
 pub const DATED_EVENTS: &[DatedEvent] = &[
     DatedEvent {
-        title: "野百合學運與國會／憲政改革",
-        date: "1990-03-16",
+        title: "霧川北岸整建採購資料缺頁",
+        date: "1994-09-21",
     },
     DatedEvent {
-        title: "終止動員戡亂與憲政轉型",
-        date: "1991-05-01",
+        title: "南澗雨季接駁路線改動",
+        date: "1995-09-05",
     },
     DatedEvent {
-        title: "首次總統直選",
-        date: "1996-03-23",
+        title: "港區倉儲承攬資料疑義",
+        date: "2003-10-15",
     },
     DatedEvent {
-        title: "三一九槍擊案與選後爭議",
-        date: "2004-03-19",
+        title: "夜間交通錄音剪輯爭議",
+        date: "2004-10-05",
     },
     DatedEvent {
-        title: "洪仲丘事件與軍中人權改革",
-        date: "2013-07-03",
+        title: "連續降雨與抽水站調度",
+        date: "2008-09-28",
     },
     DatedEvent {
-        title: "太陽花學運",
-        date: "2014-03-18",
+        title: "外島交通減班與物資運輸",
+        date: "2011-10-19",
     },
     DatedEvent {
-        title: "周子瑜遭貼台獨標籤與道歉影片爭議",
-        date: "2016-01-15",
+        title: "沿海工業區空氣監測資料落差",
+        date: "2018-09-10",
     },
     DatedEvent {
-        title: "同性婚姻法制化",
-        date: "2019-05-24",
+        title: "校園無障礙修繕預算排序",
+        date: "2016-08-21",
     },
     DatedEvent {
-        title: "COVID-19疫情治理",
-        date: "2020-01-21",
+        title: "轉乘站影像脈絡查核",
+        date: "2019-09-26",
     },
     DatedEvent {
-        title: "香港國安法實施",
-        date: "2020-06-30",
+        title: "校園接駁與訊息更新協調",
+        date: "2020-09-26",
     },
     DatedEvent {
-        title: "香港基本法第23條立法",
-        date: "2024-03-23",
+        title: "運動中心外包契約重新檢視",
+        date: "2022-09-18",
     },
     DatedEvent {
-        title: "政治檔案條例修正與轉型正義",
-        date: "2024-02-28",
+        title: "地方檔案公開與個資界線",
+        date: "2024-10-01",
     },
     DatedEvent {
-        title: "香港國安法第43條實施細則修訂",
-        date: "2026-03-23",
-    },
-    DatedEvent {
-        title: "地方公職人員選舉（尚未投票）",
-        date: "2026-11-28",
+        title: "沿海航運資訊中斷演練",
+        date: "2026-09-30",
     },
 ];
 
-/// Map a historical event's month/day anniversary onto the twelve-week
-/// campaign window immediately before an election date. Returns a zero-based
-/// campaign week, or `None` when that anniversary falls outside the window.
+/// Map a fictional date anchor onto the twelve-week campaign window
+/// immediately before the scenario's election date. Returns a zero-based
+/// campaign week, or `None` when that anchor falls outside the window.
 pub fn anniversary_week(event_date: &str, election_date: &str) -> Option<u8> {
     anniversary_day_offset(event_date, election_date)
         .map(|days_before| 11 - (days_before / 7) as u8)
@@ -305,22 +300,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_date_anniversary_to_week_before_election() {
-        assert_eq!(anniversary_week("2004-03-19", "2004-03-20"), Some(11));
-        assert_eq!(anniversary_week("2016-01-15", "2016-01-16"), Some(11));
-        assert_eq!(anniversary_week("2020-01-21", "2020-01-11"), None);
-        assert_eq!(anniversary_week("2000-01-02", "2000-03-25"), Some(0));
+    fn maps_fictional_date_anchor_to_campaign_week() {
+        assert_eq!(anniversary_week("1998-09-20", "1998-09-21"), Some(11));
+        assert_eq!(anniversary_week("2006-08-04", "2006-08-05"), Some(11));
+        assert_eq!(anniversary_week("2011-07-20", "2011-07-10"), None);
+        assert_eq!(anniversary_week("2002-05-01", "2002-07-20"), Some(0));
     }
 
     #[test]
     fn rejects_invalid_date_and_event_packs_split_content() {
-        assert_eq!(anniversary_week("2020-02-30", "2020-03-20"), None);
+        assert_eq!(anniversary_week("2002-02-30", "2002-03-20"), None);
         assert_ne!(EventPack::Democracy, EventPack::All);
         assert_ne!(EventPack::LocalLife, EventPack::MediaTrust);
-        let three_nineteen = crate::history::EVENTS
+        let warehouse_issue = crate::game_content::EVENTS
             .iter()
-            .find(|event| event.title == "三一九槍擊案與選後爭議")
+            .find(|event| event.title == "港區倉儲承攬資料疑義")
             .unwrap();
-        assert!(EventPack::Democracy.includes(three_nineteen));
+        assert!(EventPack::MediaTrust.includes(warehouse_issue));
     }
 }

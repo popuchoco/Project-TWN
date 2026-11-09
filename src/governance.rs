@@ -1,7 +1,7 @@
 //! Government approval and issue evaluation are distinct from candidate vote
 //! intention and campaign-team trust. Values are game-state indicators, not polls.
 
-use crate::history::Issue;
+use crate::game_content::Issue;
 
 pub const ISSUE_COUNT: usize = 10;
 
