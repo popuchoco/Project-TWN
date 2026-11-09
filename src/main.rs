@@ -101,6 +101,13 @@ enum ActionMenuCategory {
     Preparation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartMode {
+    Candidate,
+    Staffer,
+    Recall,
+}
+
 impl ActionMenuCategory {
     const ALL: [Self; 7] = [
         Self::PolicyGovernance,
@@ -211,6 +218,15 @@ fn run() -> Result<(), String> {
     if let Some(path) = options.roster_editor.as_deref() {
         run_roster_editor(path)?;
         return Ok(());
+    }
+
+    if should_offer_start_mode(&options, loaded_save.is_some()) {
+        match ask_start_mode()? {
+            Some(StartMode::Candidate) => {}
+            Some(StartMode::Staffer) => options.staffer_mode = true,
+            Some(StartMode::Recall) => options.recall_mode = true,
+            None => return Ok(()),
+        }
     }
 
     if options.recall_mode {
@@ -820,6 +836,45 @@ fn prompt_line(label: &str) -> Result<String, String> {
         .read_line(&mut value)
         .map_err(|error| error.to_string())?;
     Ok(value.trim().to_string())
+}
+
+fn should_offer_start_mode(options: &Options, has_loaded_save: bool) -> bool {
+    !has_loaded_save
+        && !options.auto
+        && options.batch.is_none()
+        && !options.primary
+        && !options.staffer_mode
+        && !options.recall_mode
+        && options.role.is_none()
+        && options.region.is_none()
+        && options.party.is_none()
+        && options.roster.is_none()
+        && options.recall_side.is_none()
+        && !options.recall_template_selected
+}
+
+fn ask_start_mode() -> Result<Option<StartMode>, String> {
+    loop {
+        println!("\n=== 選擇遊戲模式 ===");
+        println!("  1) 候選人模式｜親自扮演候選人，安排每日選戰行動與劇情抉擇。\n  2) 幕僚模式｜替候選人規劃競選主軸、議題攻防及每日布局。\n  3) 人民罷免模式｜選擇發動罷免或反對罷免，進行提議、連署與投票宣傳。\n  0) 離開");
+        print!("請輸入模式編號（0–3）：");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        let mut input = String::new();
+        if io::stdin()
+            .read_line(&mut input)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Ok(None);
+        }
+        match input.trim() {
+            "1" => return Ok(Some(StartMode::Candidate)),
+            "2" => return Ok(Some(StartMode::Staffer)),
+            "3" => return Ok(Some(StartMode::Recall)),
+            "0" | "q" | "Q" => return Ok(None),
+            _ => println!("請輸入 1、2、3，或 0 離開。"),
+        }
+    }
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -4081,6 +4136,7 @@ fn print_usage() {
   cargo run -- --batch 10 --year 2024 --role challenger --seed 1000 --interaction-sensitivity --batch-log interactions.tsv
 
 年份範圍：1996–2026。--scenarios 顯示虛構年表與事件卡（--history 為相容別名）；地方模式可用 --regions 檢視 22 個虛構地區，--parties 檢視虛構政黨範本。
+直接雙擊執行檔且未帶參數時，先選候選人、幕僚或人民罷免模式，再進入陣營／罷免方選擇；也可用 --staffer 或 --recall 直接指定模式。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 --staffer 開啟幕僚模式：設定競選主軸，並在六個關鍵週處理陳情、地方協調、事件回應、支持度檢視與最後布局；幕僚決策不占每日行動，但會消耗預算及影響遊戲資源。此單場模式目前不支援 --batch 或 --primary。
 --recall 開啟人民罷免模式：在罷免提議／連署方或反對罷免方之間選擇，進行 14 日提議、60 日連署與 28 日投票宣傳；可選虛構的低投票參與、集中支持或高強度動員盤型。本模式不含彈劾；遊戲中人物與事件皆採虛構合成，不對應真實對象。不實／死亡連署是違規高風險行動，不計入有效連署，遭查核會受遊戲內懲處。

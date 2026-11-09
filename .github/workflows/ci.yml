@@ -120,6 +120,21 @@ jobs:
           if (-not $interaction.Contains("分眾支持度（原型權重")) { throw "Poll lookup omitted the detailed voter-segment panel." }
           if ([regex]::Matches($interaction, "✓ 第 ").Count -ne 2) { throw "Declining the exit prompt should return to the campaign." }
 
+      - name: Smoke-test interactive game mode picker
+        run: |
+          @("1", "2", "q", "y") | cargo run -- --seed 88 | Out-File -Encoding utf8 target/ci-mode-candidate.txt
+          @("2", "2", "q", "y") | cargo run -- --seed 89 | Out-File -Encoding utf8 target/ci-mode-staffer.txt
+          @("3", "2", "1", "q", "y") | cargo run -- --seed 90 | Out-File -Encoding utf8 target/ci-mode-recall.txt
+          $candidateMode = Get-Content target/ci-mode-candidate.txt -Raw
+          $stafferMode = Get-Content target/ci-mode-staffer.txt -Raw
+          $recallMode = Get-Content target/ci-mode-recall.txt -Raw
+          foreach ($output in @($candidateMode, $stafferMode, $recallMode)) {
+            if (-not $output.Contains("=== 選擇遊戲模式 ===") -or -not $output.Contains("1) 候選人模式") -or -not $output.Contains("2) 幕僚模式") -or -not $output.Contains("3) 人民罷免模式")) { throw "Default interactive launch omitted one or more mode choices." }
+          }
+          if (-not $candidateMode.Contains("遊戲模式：候選人模式")) { throw "Selecting candidate mode did not enter candidate campaign mode." }
+          if (-not $stafferMode.Contains("遊戲模式：幕僚模式")) { throw "Selecting staffer mode did not enter staffer campaign mode." }
+          if (-not $recallMode.Contains("=== 人民罷免戰役")) { throw "Selecting recall mode did not enter the recall campaign." }
+
       - name: Smoke-test campaign setup and date mapping
         run: |
           cargo run -- --batch 1 --year 2004 --role challenger --difficulty hard --event-pack democracy --timeline date --seed 1 --batch-log target/ci-config.tsv

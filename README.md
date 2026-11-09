@@ -16,6 +16,8 @@ cargo run -- --help
 cargo run -- --year 2024 --role challenger --seed 42
 ```
 
+直接啟動下載的執行檔會先顯示遊戲模式選單，可選候選人、幕僚或人民罷免模式；也可用 `--staffer` 或 `--recall` 直接指定模式。
+
 也可以試試地方選舉或幕僚模式：
 
 ```sh
