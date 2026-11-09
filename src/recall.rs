@@ -502,15 +502,17 @@ impl RecallStoryProgress {
         };
         adjust_recall_trust(trust, delta);
 
-        match (side, action) {
-            (_, RecallActionId::CommunityListening) => {
-                if self.resident_followup_pending {
-                    adjust_recall_trust(&mut self.resident_trust, 1);
-                    self.resident_followup_pending = false;
-                } else {
-                    self.resident_followup_pending = true;
-                }
+        if action == RecallActionId::CommunityListening {
+            if self.resident_followup_pending {
+                adjust_recall_trust(&mut self.resident_trust, 1);
+                self.resident_followup_pending = false;
+            } else {
+                self.resident_followup_pending = true;
             }
+            return;
+        }
+
+        match (side, action) {
             (RecallSide::Opposition, RecallActionId::LocalService) => {
                 self.resident_followup_pending = true;
             }
