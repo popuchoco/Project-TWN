@@ -628,6 +628,7 @@ fn print_intro(game: &GameState, seed: u64, strategy: StrategyProfile, staffer_m
         println!();
     }
     print_poll_table(game);
+    println!("\n互動提示：行動選單輸入 ? 查看操作方式，p 可隨時檢視支持度；選分類後輸入 d 編號可先看行動詳情。離場需再次確認。\n");
     println!("\n行動對候選人支持度的效果會受團隊信任、議題契合、固定 seed 的小幅波動，以及對手回應影響。\n");
 }
 
@@ -809,7 +810,7 @@ fn run_interactive(
             }
         }
         let recommendations = strategy_engine_for(game, strategy, staffer_mode).rank_actions(game);
-        let selected = select_interactive_action(&recommendations)?;
+        let selected = select_interactive_action(game, &recommendations)?;
         let Some(action_id) = selected else {
             break;
         };
@@ -823,7 +824,7 @@ fn run_interactive(
 
 fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
     loop {
-        print!("選擇方案（1–{choice_count}，0 略過，q 結束本場）：");
+        print!("選擇方案（1–{choice_count}，0 略過，? 說明，q 結束本場）：");
         io::stdout().flush().map_err(|error| error.to_string())?;
         let mut input = String::new();
         io::stdin()
@@ -831,7 +832,14 @@ fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
             .map_err(|error| error.to_string())?;
         let value = input.trim();
         if value.eq_ignore_ascii_case("q") {
-            return Ok(None);
+            if confirm_end_campaign()? {
+                return Ok(None);
+            }
+            continue;
+        }
+        if value == "?" {
+            println!("輸入編號採用方案，0 略過本段且不耗每日行動；選擇會改變資源與後續劇情。q 會詢問是否提前結算本場。\n");
+            continue;
         }
         if let Ok(selection) = value.parse::<usize>() {
             if selection <= choice_count {
@@ -840,6 +848,72 @@ fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
         }
         println!("請輸入有效的選項、0 或 q。\n");
     }
+}
+
+fn confirm_end_campaign() -> Result<bool, String> {
+    print!("結束本場並立即結算？輸入 y 確認，其餘輸入返回：");
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|error| error.to_string())?;
+    Ok(matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn print_action_menu_help() {
+    println!(
+        "\n行動方式：先選一個分類，再選行動；輸入 r 可執行策略引擎首選，p 可隨時查看支持度，? 可重看說明。分類內輸入 d 編號可先看行動描述與效果，數字則會直接執行；b 返回上一層。q 會先詢問是否提前結算。\n支持度預估是目前遊戲模型的一步期望，不是實際民調；每次每日行動都會推進一天。\n"
+    );
+}
+
+fn print_action_details(recommendation: &StrategyRecommendation) {
+    let preview = &recommendation.preview;
+    println!("\n【行動詳情｜{}】", preview.action_name);
+    println!("{}", preview.action_description);
+    println!(
+        "預估影響：預算 -{}｜候選人支持度 {:+.2}｜團隊信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}",
+        preview.cost,
+        preview.expected_support_delta,
+        preview.trust_delta,
+        preview.turnout_delta,
+        preview.stamina_delta
+    );
+    if preview.detection_probability > 0.0 {
+        println!(
+            "誠信風險：模型預估揭露率 {:.0}%，期望懲處資源 {:.1}。",
+            preview.detection_probability * 100.0,
+            preview.expected_sanction_fine
+        );
+    }
+    if preview.infrastructure_delta > 0.0 {
+        println!(
+            "組織效果：地面調度量能 +{:.0}。",
+            preview.infrastructure_delta
+        );
+    }
+    let mut context = Vec::new();
+    if preview.event_match {
+        context.push("呼應本週公共議題");
+    }
+    if preview.local_match {
+        context.push("符合地方關注");
+    }
+    if preview.objective_match {
+        context.push("符合本週任務");
+    }
+    if !context.is_empty() {
+        println!("情境契合：{}。", context.join("、"));
+    }
+    if !recommendation.rationales.is_empty() {
+        println!("推薦理由：{}。", recommendation.rationales.join("；"));
+    }
+    println!(
+        "策略排序分 {:.2}；支持度變化仍會受每日波動與對手回應影響。",
+        recommendation.score
+    );
 }
 
 fn run_interactive_staffer_brief(game: &mut GameState) -> Result<bool, String> {
@@ -1060,6 +1134,7 @@ fn strategy_engine_for(
 }
 
 fn select_interactive_action(
+    game: &GameState,
     recommendations: &[StrategyRecommendation],
 ) -> Result<Option<ActionId>, String> {
     loop {
@@ -1075,7 +1150,7 @@ fn select_interactive_action(
             })
             .collect();
 
-        println!("可選行動分類（依目前陣營與預算篩選）：");
+        println!("\n【今日行動｜先選分類】依目前陣營與預算篩選：");
         for (index, (category, options)) in categories.iter().enumerate() {
             let top = &options[0];
             println!(
@@ -1087,7 +1162,7 @@ fn select_interactive_action(
                 top.preview.expected_support_delta
             );
         }
-        println!("  r) 直接執行全場策略推薦　q) 結束本場");
+        println!("  r) 執行策略推薦　p) 查看支持度　?) 操作說明　q) 結束本場");
         print!("選分類：");
         io::stdout().flush().map_err(|error| error.to_string())?;
         let mut input = String::new();
@@ -1096,15 +1171,26 @@ fn select_interactive_action(
             .map_err(|error| error.to_string())?;
         let choice = input.trim();
         if choice.eq_ignore_ascii_case("q") {
-            return Ok(None);
+            if confirm_end_campaign()? {
+                return Ok(None);
+            }
+            continue;
         }
         if choice.eq_ignore_ascii_case("r") {
             return Ok(recommendations
                 .first()
                 .map(|recommendation| recommendation.preview.id));
         }
+        if choice.eq_ignore_ascii_case("p") {
+            print_poll_table(game);
+            continue;
+        }
+        if choice == "?" {
+            print_action_menu_help();
+            continue;
+        }
         let Ok(index) = choice.parse::<usize>() else {
-            println!("請輸入分類編號、r 或 q。\n");
+            println!("請輸入分類編號、r、p、? 或 q。\n");
             continue;
         };
         let Some((category, options)) = categories.get(index.saturating_sub(1)) else {
@@ -1113,7 +1199,7 @@ fn select_interactive_action(
         };
 
         loop {
-            println!("\n【{}】", category.label());
+            println!("\n【{}｜先看排序，再選要執行的行動】", category.label());
             for (option_index, recommendation) in options.iter().enumerate() {
                 let risk = if recommendation.preview.detection_probability > 0.0 {
                     format!(
@@ -1132,21 +1218,23 @@ fn select_interactive_action(
                     String::new()
                 };
                 println!(
-                    "  {}) [{}] {}｜預算 {}｜支持度 {:+.2}｜團隊信任 {:+.2}｜動員 {:+.2}｜體力 {:+.1}｜策略分 {:.2}{}{}",
+                    "  {}) {}{} [{}]｜預算 -{}｜支持度 {:+.2}｜體力 {:+.1}{}{}",
                     option_index + 1,
-                    recommendation.preview.category.label(),
+                    if option_index == 0 {
+                        "★ 推薦｜"
+                    } else {
+                        ""
+                    },
                     recommendation.preview.action_name,
+                    recommendation.preview.category.label(),
                     recommendation.preview.cost,
                     recommendation.preview.expected_support_delta,
-                    recommendation.preview.trust_delta,
-                    recommendation.preview.turnout_delta,
                     recommendation.preview.stamina_delta,
-                    recommendation.score,
                     risk,
                     infrastructure
                 );
             }
-            print!("選行動編號（b 返回分類，q 結束）：");
+            print!("選行動（d 編號看詳情，r 本類推薦，p 支持度，b 返回，? 說明，q 結束）：");
             io::stdout().flush().map_err(|error| error.to_string())?;
             input.clear();
             io::stdin()
@@ -1157,10 +1245,41 @@ fn select_interactive_action(
                 break;
             }
             if selected.eq_ignore_ascii_case("q") {
-                return Ok(None);
+                if confirm_end_campaign()? {
+                    return Ok(None);
+                }
+                continue;
+            }
+            if selected.eq_ignore_ascii_case("r") {
+                return Ok(options
+                    .first()
+                    .map(|recommendation| recommendation.preview.id));
+            }
+            if selected.eq_ignore_ascii_case("p") {
+                print_poll_table(game);
+                continue;
+            }
+            if selected == "?" {
+                print_action_menu_help();
+                continue;
+            }
+            if let Some(number) = selected
+                .strip_prefix('d')
+                .or_else(|| selected.strip_prefix('D'))
+            {
+                let Ok(option_index) = number.trim().parse::<usize>() else {
+                    println!("請輸入 d 加行動編號，例如 d 2。\n");
+                    continue;
+                };
+                if let Some(recommendation) = options.get(option_index.saturating_sub(1)) {
+                    print_action_details(recommendation);
+                } else {
+                    println!("沒有這個行動。\n");
+                }
+                continue;
             }
             let Ok(option_index) = selected.parse::<usize>() else {
-                println!("請輸入行動編號、b 或 q。\n");
+                println!("請輸入行動編號、d 編號、r、p、b、? 或 q。\n");
                 continue;
             };
             if let Some(recommendation) = options.get(option_index.saturating_sub(1)) {

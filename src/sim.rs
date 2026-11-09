@@ -1127,6 +1127,7 @@ pub struct StafferOutcome {
 pub struct ActionPreview {
     pub id: ActionId,
     pub action_name: &'static str,
+    pub action_description: &'static str,
     pub category: TacticCategory,
     pub expected_swing: f64,
     pub direct_support_delta: f64,
@@ -1790,6 +1791,7 @@ impl GameState {
         ActionPreview {
             id: action.id,
             action_name: action.name,
+            action_description: action.description,
             category: action.id.category(),
             expected_swing,
             direct_support_delta,
@@ -2841,6 +2843,7 @@ mod tests {
         let budget_before = previewed.budget;
 
         let preview = previewed.preview_action(ActionId::PolicyForum).unwrap();
+        assert!(preview.action_description.contains("政策"));
         assert!(preview.expected_support_delta.is_finite());
         assert_eq!(previewed.polls, polls_before);
         assert_eq!(previewed.budget, budget_before);

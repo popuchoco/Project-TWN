@@ -90,7 +90,7 @@ jobs:
           }
           $strategies = @($rows | Select-Object -Skip 1 | ForEach-Object { $_.Split("`t")[5] } | Sort-Object -Unique)
           if ($strategies.Count -ne 7) { throw "Expected seven distinct strategy profiles; got $($strategies.Count)." }
-          @("1", "1", "4", "1", "6", "b", "q") | cargo run -- --year 2024 --role challenger --strategy issue --seed 77 | Out-File -Encoding utf8 target/ci-strategy-advice.txt
+          @("1", "d 1", "1", "4", "1", "6", "b", "q", "y") | cargo run -- --year 2024 --role challenger --strategy issue --seed 77 | Out-File -Encoding utf8 target/ci-strategy-advice.txt
           $advice = Get-Content target/ci-strategy-advice.txt -Raw
           if (-not $advice.Contains("策略分")) { throw "Interactive action list omitted strategy ranking." }
           if (-not $advice.Contains("實際變化")) { throw "Action outcome omitted realized support change." }
@@ -102,6 +102,16 @@ jobs:
           if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("柯文哲 / 吳欣盈")) { throw "Opening screen omitted the opponent roster." }
           if (-not $advice.Contains("尚未建模國政／政府施政滿意度民調")) { throw "Opening screen did not distinguish election support from government approval." }
           if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「侯友宜 / 趙少康")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
+          if (-not $advice.Contains("行動詳情｜") -or -not $advice.Contains("推薦理由：")) { throw "Interactive action details omitted explanations." }
+          if (-not $advice.Contains("結束本場並立即結算？")) { throw "Early exit did not ask for confirmation." }
+
+      - name: Smoke-test contextual help, poll lookup, and safe exit
+        run: |
+          @("?", "p", "1", "d 1", "1", "q", "n", "r", "q", "y") | cargo run -- --year 2024 --role challenger --seed 78 | Out-File -Encoding utf8 target/ci-interaction.txt
+          $interaction = Get-Content target/ci-interaction.txt -Raw
+          if (-not $interaction.Contains("行動方式：")) { throw "Interactive help did not explain the controls." }
+          if ([regex]::Matches($interaction, "候選人選舉支持度").Count -lt 2) { throw "Poll lookup should be available during action selection." }
+          if ([regex]::Matches($interaction, "✓ 第 ").Count -ne 2) { throw "Declining the exit prompt should return to the campaign." }
 
       - name: Smoke-test campaign setup and date mapping
         run: |
