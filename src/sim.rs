@@ -3421,9 +3421,9 @@ mod tests {
         let region = crate::game_content::find_region("雲棲市").unwrap();
         let actions = [
             ActionId::CommunityTour,
-            ActionId::PublicServices,
+            ActionId::VulnerableCommunityCare,
             ActionId::VolunteerCanvassing,
-            ActionId::TransparencyReport,
+            ActionId::FactCheckResponse,
         ];
         let mut original = GameState::new_local_with_style(
             2026,
