@@ -216,3 +216,23 @@ jobs:
           foreach ($output in @($initiator, $opposition)) {
             if (-not $output.Contains("未成案") -and -not $output.Contains("罷免通過：") -and -not $output.Contains("罷免未通過：")) { throw "Recall campaign did not present a procedural outcome." }
           }
+
+      - name: Smoke-test saves, candidate roster, election night, and party-list seats
+        run: |
+          @("r", "q", "y") | cargo run -- --year 2024 --role challenger --seed 82 --save target/ci-campaign-save.tsv | Out-File -Encoding utf8 target/ci-save-first-session.txt
+          cargo run -- --load target/ci-campaign-save.tsv | Out-File -Encoding utf8 target/ci-save-resumed-session.txt
+          @("2", "沈知行", "群島共治黨", "48", "y", "林沐青", "曙光民主聯盟", "52", "n") | cargo run -- --roster-editor target/ci-roster.tsv | Out-File -Encoding utf8 target/ci-roster-editor.txt
+          cargo run -- --year 2024 --role challenger --roster target/ci-roster.tsv --auto --seed 83 | Out-File -Encoding utf8 target/ci-roster-campaign.txt
+          @("1", "q", "y") | cargo run -- --recall --recall-side initiator --recall-template synthetic --seed 84 --save target/ci-recall-save.tsv | Out-File -Encoding utf8 target/ci-recall-save-session.txt
+          @("q", "y") | cargo run -- --load target/ci-recall-save.tsv | Out-File -Encoding utf8 target/ci-recall-resumed-session.txt
+          @("0", "q", "y") | cargo run -- --year 2024 --role challenger --staffer --seed 85 --save target/ci-staffer-save.tsv | Out-File -Encoding utf8 target/ci-staffer-save-session.txt
+          @("q", "y") | cargo run -- --load target/ci-staffer-save.tsv | Out-File -Encoding utf8 target/ci-staffer-resumed-session.txt
+          $resume = Get-Content target/ci-save-resumed-session.txt -Raw
+          $roster = Get-Content target/ci-roster-campaign.txt -Raw
+          $recallResume = Get-Content target/ci-recall-resumed-session.txt -Raw
+          $stafferResume = Get-Content target/ci-staffer-resumed-session.txt -Raw
+          if (-not $resume.Contains("投票日開票｜虛構情境估算") -or -not $resume.Contains("本區票數：") -or -not $resume.Contains("全國候選人總票數：") -or -not $resume.Contains("全國政黨票／不分區席次情境")) { throw "Resumed presidential save did not resolve detailed regional count and party-list seats." }
+          if (-not $roster.Contains("玩家操控：沈知行｜政黨／名單：群島共治黨") -or -not $roster.Contains("22 個虛構地區")) { throw "Candidate roster was not applied to the election-night simulation." }
+          if (-not $recallResume.Contains("第 7 / 14 日") -or -not $recallResume.Contains("行政查對")) { throw "Recall save did not resume the deterministic phase and eligibility briefing." }
+          if (-not $recallResume.Contains("一次補提") -or -not $recallResume.Contains("符合本作可罷免對象條件")) { throw "Recall mode omitted eligibility or the one-time supplement process." }
+          if (-not $stafferResume.Contains("遊戲模式：幕僚模式") -or -not $stafferResume.Contains("投票日開票｜虛構情境估算")) { throw "Staffer save did not resume the selected mode and resolve its final count." }

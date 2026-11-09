@@ -1,4 +1,8 @@
 use project_twn::campaign::{CampaignDifficulty, CampaignSetup, EventPack, EventTimeline};
+use project_twn::election_night::count_by_region;
+use project_twn::electoral::{
+    allocate_party_list_seats, party_ticket_support, PARTY_LIST_SEATS, PARTY_LIST_THRESHOLD_PCT,
+};
 use project_twn::game_content::{
     find_party, find_region, PartyProfile, RegionProfile, ELECTIONS, EVENTS, LEGISLATURE_SNAPSHOTS,
     PARTY_PROFILES, REGIONS, VOTER_SEGMENTS,
@@ -7,6 +11,11 @@ use project_twn::governance::issue_label;
 use project_twn::primary::{PrimaryChoice, PrimaryContest, PRIMARY_ROUNDS};
 use project_twn::recall::{
     RecallActionId, RecallEnding, RecallPhase, RecallSide, RecallState, RecallTemplate,
+    SIGNATURE_REVIEW_CHECKS,
+};
+use project_twn::roster::{CandidateRoster, RosterEntry};
+use project_twn::savegame::{
+    CampaignSaveConfig, RecallSaveConfig, SaveCommand, SaveConfig, SaveGame,
 };
 use project_twn::sim::{
     ActionId, CampaignScorecard, CampaignStyle, ElectionOutcome, GameError, GameState,
@@ -63,6 +72,11 @@ struct Options {
     sensitivity: bool,
     interaction_sensitivity: bool,
     batch_log: Option<String>,
+    roster: Option<String>,
+    roster_editor: Option<String>,
+    save_path: Option<String>,
+    load_path: Option<String>,
+    roster_data: Option<CandidateRoster>,
 }
 
 #[derive(Clone, Copy)]
@@ -167,7 +181,19 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let options = parse_args()?;
+    let mut options = parse_args()?;
+    let load_path = options.load_path.clone();
+    let loaded_save = match load_path.as_deref() {
+        Some(path) => {
+            let save = SaveGame::read(path)?;
+            apply_saved_options(&mut options, &save)?;
+            if options.save_path.is_none() {
+                options.save_path = Some(path.to_string());
+            }
+            Some(save)
+        }
+        None => None,
+    };
     if options.show_scenarios {
         print_scenarios();
         return Ok(());
@@ -178,6 +204,10 @@ fn run() -> Result<(), String> {
     }
     if options.list_parties {
         print_parties();
+        return Ok(());
+    }
+    if let Some(path) = options.roster_editor.as_deref() {
+        run_roster_editor(path)?;
         return Ok(());
     }
 
@@ -195,6 +225,9 @@ fn run() -> Result<(), String> {
                     .to_string(),
             );
         }
+        if options.auto && options.save_path.is_some() {
+            return Err("罷免自動示範尚未支援逐步存檔；請移除 --auto 或 --save。".to_string());
+        }
         let side = match options.recall_side {
             Some(side) => side,
             None if options.auto => RecallSide::Initiator,
@@ -206,11 +239,31 @@ fn run() -> Result<(), String> {
             ask_recall_template()?
         };
         let mut game = RecallState::new(template, side, options.seed);
+        let mut journal = loaded_save
+            .as_ref()
+            .map(|save| save.commands.clone())
+            .unwrap_or_default();
+        if loaded_save.is_some() {
+            replay_recall(&mut game, &journal)?;
+        }
+        let save_config = RecallSaveConfig {
+            side: side.key().to_string(),
+            template: template.key().to_string(),
+            seed: options.seed,
+        };
+        if let Some(path) = options.save_path.as_deref() {
+            persist_recall(path, &save_config, &journal)?;
+        }
         print_recall_intro(&game);
         if options.auto {
             run_recall_auto(&mut game);
-        } else {
-            run_recall_interactive(&mut game)?;
+        } else if game.phase != RecallPhase::Complete {
+            run_recall_interactive(
+                &mut game,
+                &mut journal,
+                options.save_path.as_deref(),
+                &save_config,
+            )?;
         }
         print_recall_result(&game);
         return Ok(());
@@ -240,6 +293,9 @@ fn run() -> Result<(), String> {
         return Err("--recall-side 與 --recall-template 必須搭配 --recall。".to_string());
     }
 
+    if options.auto && options.save_path.is_some() {
+        return Err("自動示範模式尚未支援逐步存檔；請移除 --auto 或 --save。".to_string());
+    }
     if options.staffer_mode && options.primary {
         return Err("幕僚模式由玩家扮演競選幕僚；目前不搭配 --primary 初選模式。".to_string());
     }
@@ -262,6 +318,24 @@ fn run() -> Result<(), String> {
         selected_party,
     };
     let mut game = new_scenario_game(&scenario, options.seed, ModelParameters::default());
+    if let Some(roster) = options.roster_data.as_ref() {
+        roster.apply(&mut game)?;
+    } else if let Some(path) = options.roster.as_deref() {
+        let roster = CandidateRoster::read(path)?;
+        roster.apply(&mut game)?;
+        options.roster_data = Some(roster);
+    }
+    let save_config = make_campaign_save_config(&options, role, style, region, selected_party);
+    let mut journal = loaded_save
+        .as_ref()
+        .map(|save| save.commands.clone())
+        .unwrap_or_default();
+    if loaded_save.is_some() {
+        replay_campaign(&mut game, &journal)?;
+    }
+    if let Some(path) = options.save_path.as_deref() {
+        persist_campaign(path, &save_config, &journal)?;
+    }
     print_intro(&game, options.seed, options.strategy, options.staffer_mode);
 
     if options.auto {
@@ -270,8 +344,15 @@ fn run() -> Result<(), String> {
         } else {
             run_auto(&mut game, true, options.strategy);
         }
-    } else {
-        run_interactive(&mut game, options.strategy, options.staffer_mode)?;
+    } else if !game.is_settled() && !game.is_finished() {
+        run_interactive(
+            &mut game,
+            options.strategy,
+            options.staffer_mode,
+            &mut journal,
+            options.save_path.as_deref(),
+            &save_config,
+        )?;
     }
     let result = print_final(&mut game);
     if options.staffer_mode {
@@ -279,6 +360,7 @@ fn run() -> Result<(), String> {
     } else {
         print_candidate_story_summary(&game);
     }
+    print_election_night(&game, &result, options.seed)?;
     if let Some(path) = options.log.as_deref() {
         save_campaign_log(
             path,
@@ -289,6 +371,290 @@ fn run() -> Result<(), String> {
             options.staffer_mode,
         )?;
         println!("本場紀錄已追加至：{path}");
+    }
+    Ok(())
+}
+
+fn print_election_night(
+    game: &GameState,
+    result: &ElectionOutcome,
+    seed: u64,
+) -> Result<(), String> {
+    let regions = game
+        .region
+        .map(|region| vec![region])
+        .unwrap_or_else(|| REGIONS.iter().collect());
+    let candidate_names: Vec<_> = game
+        .candidates
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .collect();
+    let parties: Vec<_> = game
+        .candidates
+        .iter()
+        .map(|candidate| candidate.party.to_string())
+        .collect();
+    let count = count_by_region(&candidate_names, &parties, &result.shares, &regions, seed)
+        .map_err(str::to_string)?;
+    println!("\n【投票日開票｜虛構情境估算】分區票數會精確加總至本場終局模型票數；不是實際選舉資料。共揭曉 {} 個虛構地區：", count.regions.len());
+    let mut running = vec![0_u64; count.candidates.len()];
+    for (index, region) in count.regions.iter().enumerate() {
+        for (candidate, votes) in running.iter_mut().zip(&region.candidate_votes) {
+            *candidate += votes;
+        }
+        let region_winner = &count.candidates[region.winner_index];
+        let mut leaders: Vec<_> = running.iter().enumerate().collect();
+        leaders.sort_by(|(left_i, left), (right_i, right)| {
+            right.cmp(left).then_with(|| left_i.cmp(right_i))
+        });
+        let leader = &count.candidates[leaders[0].0];
+        let second = leaders.get(1).map(|(_, votes)| **votes).unwrap_or(0);
+        println!(
+            "  {:02}/{:02} {}｜投票率 {:>5.1}%｜{} 領先（{} 票）｜累計領先：{}（+{} 票）",
+            index + 1,
+            count.regions.len(),
+            region.name,
+            region.ballots as f64 / region.electorate as f64 * 100.0,
+            region_winner,
+            region.candidate_votes[region.winner_index],
+            leader,
+            leaders[0].1.saturating_sub(second)
+        );
+        let candidate_breakdown = count
+            .candidates
+            .iter()
+            .zip(&region.candidate_votes)
+            .map(|(candidate, votes)| {
+                format!(
+                    "{candidate} {votes} 票（{:.1}%）",
+                    *votes as f64 / region.ballots as f64 * 100.0
+                )
+            })
+            .collect::<Vec<_>>();
+        println!("      本區票數：{}", candidate_breakdown.join("／"));
+    }
+    println!("全區合計：{} 張有效票。", count.total_valid_votes);
+    let national_breakdown = count
+        .candidates
+        .iter()
+        .zip(&count.national_votes)
+        .map(|(candidate, votes)| {
+            format!(
+                "{candidate} {votes} 票（{:.1}%）",
+                *votes as f64 / count.total_valid_votes as f64 * 100.0
+            )
+        })
+        .collect::<Vec<_>>();
+    println!("全國候選人總票數：{}", national_breakdown.join("／"));
+    if game.region.is_none() {
+        let candidate_inputs: Vec<_> = game
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                (
+                    candidate.party.to_string(),
+                    candidate.name.clone(),
+                    candidate.starting_share,
+                    result.shares[index],
+                )
+            })
+            .collect();
+        let support = party_ticket_support(
+            &candidate_inputs,
+            game.candidates[game.player_index].party,
+            game.trust,
+            game.turnout_momentum,
+        )
+        .map_err(str::to_string)?;
+        let tickets = allocate_party_list_seats(
+            support,
+            count.total_valid_votes,
+            PARTY_LIST_SEATS,
+            PARTY_LIST_THRESHOLD_PCT,
+        )
+        .map_err(str::to_string)?;
+        println!("\n【全國政黨票／不分區席次情境】政黨支持度與候選人個人支持分開計算；政黨票經 5% 門檻後以最大餘數法分配 34 席：");
+        for ticket in tickets {
+            println!(
+                "  {}｜政黨支持度 {:>5.2}%｜政黨票 {:>7} 張（{:>5.2}%）｜不分區席次 {}",
+                ticket.party, ticket.support_pct, ticket.votes, ticket.vote_share_pct, ticket.seats
+            );
+        }
+    }
+    Ok(())
+}
+
+fn apply_saved_options(options: &mut Options, save: &SaveGame) -> Result<(), String> {
+    options.auto = false;
+    match &save.config {
+        SaveConfig::Campaign(config) => {
+            options.year = config.year;
+            options.role = Some(parse_role(&config.side)?);
+            options.style = parse_style(&config.style)?;
+            options.strategy = StrategyProfile::parse(&config.strategy)?;
+            options.seed = config.seed;
+            options.region = config.region.clone();
+            options.party = config.party.clone();
+            options.setup.difficulty = CampaignDifficulty::parse(&config.difficulty)
+                .ok_or_else(|| "存檔難度設定不支援。".to_string())?;
+            options.setup.event_pack = EventPack::parse(&config.event_pack)
+                .ok_or_else(|| "存檔事件包設定不支援。".to_string())?;
+            options.setup.timeline = EventTimeline::parse(&config.timeline)
+                .ok_or_else(|| "存檔事件時序設定不支援。".to_string())?;
+            options.staffer_mode = config.staffer;
+            options.recall_mode = false;
+            options.recall_side = None;
+            options.roster_data = config.roster.clone();
+        }
+        SaveConfig::Recall(config) => {
+            options.recall_mode = true;
+            options.recall_side = Some(parse_recall_side(&config.side)?);
+            options.recall_template = RecallTemplate::parse(&config.template)
+                .ok_or_else(|| "存檔罷免情境設定不支援。".to_string())?;
+            options.recall_template_selected = true;
+            options.seed = config.seed;
+            options.role = None;
+            options.region = None;
+            options.party = None;
+            options.staffer_mode = false;
+            options.primary = false;
+            options.roster_data = None;
+        }
+    }
+    Ok(())
+}
+
+fn make_campaign_save_config(
+    options: &Options,
+    role: Side,
+    style: CampaignStyle,
+    region: Option<&RegionProfile>,
+    party: Option<&PartyProfile>,
+) -> CampaignSaveConfig {
+    CampaignSaveConfig {
+        year: options.year,
+        side: match role {
+            Side::Incumbent => "incumbent",
+            Side::Challenger => "challenger",
+        }
+        .to_string(),
+        style: style_key(style).to_string(),
+        strategy: options.strategy.key().to_string(),
+        seed: options.seed,
+        region: region.map(|region| region.key.to_string()),
+        party: party.map(|party| party.name.to_string()),
+        difficulty: options.setup.difficulty.key().to_string(),
+        event_pack: options.setup.event_pack.key().to_string(),
+        timeline: options.setup.timeline.key().to_string(),
+        staffer: options.staffer_mode,
+        roster: options.roster_data.clone(),
+    }
+}
+
+fn style_key(style: CampaignStyle) -> &'static str {
+    match style {
+        CampaignStyle::Balanced => "balanced",
+        CampaignStyle::Policy => "policy",
+        CampaignStyle::Organizer => "organizer",
+        CampaignStyle::Communicator => "communicator",
+    }
+}
+
+fn replay_campaign(game: &mut GameState, commands: &[SaveCommand]) -> Result<(), String> {
+    for (index, command) in commands.iter().enumerate() {
+        let result = match command {
+            SaveCommand::Action(action) => ActionId::ALL
+                .get(*action)
+                .ok_or_else(|| "行動索引錯誤".to_string())
+                .and_then(|id| {
+                    game.apply_action(*id)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }),
+            SaveCommand::StoryChoice(choice) => game
+                .apply_story_choice(*choice)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            SaveCommand::SkipStory => game.skip_story_beat().map_err(|error| error.to_string()),
+            SaveCommand::StafferChoice(choice) => game
+                .apply_staffer_choice(*choice)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            SaveCommand::SkipStaffer => {
+                game.skip_staffer_brief().map_err(|error| error.to_string())
+            }
+            SaveCommand::SettleEarly => {
+                game.finish();
+                Ok(())
+            }
+            SaveCommand::RecallAction(_) => Err("罷免行動不可用於競選存檔".to_string()),
+        };
+        result.map_err(|error| format!("無法重播存檔第 {} 個決策：{error}", index + 1))?;
+    }
+    game.validate()
+        .map_err(|error| format!("存檔狀態檢查失敗：{error}"))
+}
+
+fn replay_recall(game: &mut RecallState, commands: &[SaveCommand]) -> Result<(), String> {
+    for (index, command) in commands.iter().enumerate() {
+        let SaveCommand::RecallAction(action) = command else {
+            return Err("罷免存檔含有不相容的競選決策。".to_string());
+        };
+        let action = RecallActionId::ALL
+            .get(*action)
+            .ok_or_else(|| "存檔罷免行動索引錯誤。".to_string())?;
+        game.apply_action(*action)
+            .map_err(|error| format!("無法重播罷免存檔第 {} 個決策：{error}", index + 1))?;
+    }
+    Ok(())
+}
+
+fn persist_campaign(
+    path: &str,
+    config: &CampaignSaveConfig,
+    commands: &[SaveCommand],
+) -> Result<(), String> {
+    SaveGame {
+        config: SaveConfig::Campaign(config.clone()),
+        commands: commands.to_vec(),
+    }
+    .write(path)
+}
+
+fn persist_recall(
+    path: &str,
+    config: &RecallSaveConfig,
+    commands: &[SaveCommand],
+) -> Result<(), String> {
+    SaveGame {
+        config: SaveConfig::Recall(config.clone()),
+        commands: commands.to_vec(),
+    }
+    .write(path)
+}
+
+fn checkpoint_campaign(
+    game: &GameState,
+    path: Option<&str>,
+    config: &CampaignSaveConfig,
+    commands: &[SaveCommand],
+) -> Result<(), String> {
+    if let Some(path) = path {
+        game.validate()
+            .map_err(|error| format!("存檔前狀態檢查失敗：{error}"))?;
+        persist_campaign(path, config, commands)?;
+    }
+    Ok(())
+}
+
+fn checkpoint_recall(
+    path: Option<&str>,
+    config: &RecallSaveConfig,
+    commands: &[SaveCommand],
+) -> Result<(), String> {
+    if let Some(path) = path {
+        persist_recall(path, config, commands)?;
     }
     Ok(())
 }
@@ -361,6 +727,81 @@ fn new_scenario_game(
     }
 }
 
+fn run_roster_editor(path: &str) -> Result<(), String> {
+    println!(
+        "【虛構候選人名冊編輯器】名冊會獨立存成 TSV；可編輯姓名、虛構政黨、起始盤與玩家候選人。\n"
+    );
+    println!(
+        "可用虛構政黨：{}",
+        PARTY_PROFILES
+            .iter()
+            .map(|party| party.name)
+            .collect::<Vec<_>>()
+            .join("、")
+    );
+    let count: usize = loop {
+        let value = prompt_line("候選人人數（2–5）：")?;
+        if let Ok(value) = value.parse::<usize>() {
+            if (2..=5).contains(&value) {
+                break value;
+            }
+        }
+        println!("請輸入 2 至 5 的整數。\n");
+    };
+    let mut candidates = Vec::with_capacity(count);
+    for index in 0..count {
+        println!("\n候選人 {}：", index + 1);
+        let name = prompt_line("  姓名：")?;
+        let party = loop {
+            let value = prompt_line("  政黨名稱（須使用上述虛構政黨）：")?;
+            if find_party(&value).is_some() {
+                break value;
+            }
+            println!("  這個政黨不在虛構名冊中，請重新輸入。\n");
+        };
+        let starting_support: f64 = loop {
+            let value = prompt_line("  起始支持度（0–100）：")?;
+            if let Ok(value) = value.parse::<f64>() {
+                if value.is_finite() && (0.0..=100.0).contains(&value) {
+                    break value;
+                }
+            }
+            println!("  請輸入 0 至 100 的數字。\n");
+        };
+        let player = loop {
+            match prompt_line("  本場玩家候選人？（y/n）：")?
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "y" | "yes" | "是" => break true,
+                "n" | "no" | "否" => break false,
+                _ => println!("  請輸入 y 或 n。"),
+            }
+        };
+        candidates.push(RosterEntry {
+            name,
+            party,
+            starting_support,
+            player,
+        });
+    }
+    let roster = CandidateRoster { candidates };
+    roster.validate()?;
+    roster.write(path)?;
+    println!("\n名冊已儲存：{path}\n使用方式：project-twn --year 2024 --role challenger --roster \"{path}\"");
+    Ok(())
+}
+
+fn prompt_line(label: &str) -> Result<String, String> {
+    print!("{label}");
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let mut value = String::new();
+    io::stdin()
+        .read_line(&mut value)
+        .map_err(|error| error.to_string())?;
+    Ok(value.trim().to_string())
+}
+
 fn parse_args() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     let mut options = Options {
@@ -389,6 +830,11 @@ fn parse_args() -> Result<Options, String> {
         sensitivity: false,
         interaction_sensitivity: false,
         batch_log: None,
+        roster: None,
+        roster_editor: None,
+        save_path: None,
+        load_path: None,
+        roster_data: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -475,6 +921,30 @@ fn parse_args() -> Result<Options, String> {
                 options.batch_log = Some(
                     args.next()
                         .ok_or_else(|| "--batch-log 後面需要 TSV 檔案路徑".to_string())?,
+                )
+            }
+            "--roster" => {
+                options.roster = Some(
+                    args.next()
+                        .ok_or_else(|| "--roster 後面需要 TSV 檔案路徑".to_string())?,
+                )
+            }
+            "--roster-editor" => {
+                options.roster_editor = Some(
+                    args.next()
+                        .ok_or_else(|| "--roster-editor 後面需要 TSV 檔案路徑".to_string())?,
+                )
+            }
+            "--save" => {
+                options.save_path = Some(
+                    args.next()
+                        .ok_or_else(|| "--save 後面需要存檔路徑".to_string())?,
+                )
+            }
+            "--load" => {
+                options.load_path = Some(
+                    args.next()
+                        .ok_or_else(|| "--load 後面需要存檔路徑".to_string())?,
                 )
             }
             "--simulate" => {}
@@ -578,6 +1048,29 @@ fn parse_args() -> Result<Options, String> {
     }
     if options.batch_log.is_some() && options.batch.is_none() {
         return Err("--batch-log 必須搭配 --batch 使用。".to_string());
+    }
+    if options.roster.is_some() && options.batch.is_some() {
+        return Err("自訂候選人名冊目前限單場戰役，不能搭配 --batch。".to_string());
+    }
+    if options.roster.is_some() && options.recall_mode {
+        return Err("候選人名冊不適用於獨立罷免模式。".to_string());
+    }
+    if options.roster.is_some() && options.roster_editor.is_some() {
+        return Err("--roster 與 --roster-editor 請分開使用。".to_string());
+    }
+    if options.save_path.is_some() && options.batch.is_some() {
+        return Err("存檔／讀檔目前限互動式單場戰役，不支援批次模式。".to_string());
+    }
+    if options.save_path.is_some() && options.auto {
+        return Err("逐步存檔目前限互動模式；請移除 --auto。".to_string());
+    }
+    if options.load_path.is_some()
+        && (options.show_scenarios
+            || options.list_regions
+            || options.list_parties
+            || options.roster_editor.is_some())
+    {
+        return Err("--load 請單獨用於載入戰役，不可搭配清單或名冊編輯器。".to_string());
     }
     Ok(options)
 }
@@ -690,6 +1183,20 @@ fn print_recall_intro(game: &RecallState) {
         game.electorate
     );
     println!("{}", game.template.briefing());
+    let eligibility = game.template.eligibility();
+    println!(
+        "對象資格查核：{}，就職 {} 個月；{}。",
+        match eligibility.office {
+            project_twn::recall::RecallOffice::ConstituencyLegislator => "區域立法委員",
+            project_twn::recall::RecallOffice::PartyListLegislator => "不分區立法委員",
+        },
+        eligibility.months_in_office,
+        if game.target_is_eligible() {
+            "已滿一年且符合本作可罷免對象條件"
+        } else {
+            "不符本作可罷免對象條件"
+        }
+    );
     println!(
         "選區議題：{}　｜目標公共服務紀錄：{:.1}/100（遊戲狀態，會隨答辯或查證改變）",
         game.template.constituency_issue(),
@@ -700,7 +1207,7 @@ fn print_recall_intro(game: &RecallState) {
         "法定門檻：提議 {} 人（1%）→有效連署 {} 人（10%）→同意票至少 {} 人（1/4），且多於不同意票。",
         game.proposal_threshold, game.signature_threshold, game.yes_floor
     );
-    println!("時間視窗：提議準備 14 日（2 個 7 日區塊）、連署 60 日（6 個 10 日區塊）、投票宣傳 28 日（4 個 7 日區塊）；每次選擇推進一個策略區塊。");
+    println!("時間視窗（遊戲壓縮）：提議準備 14 日、連署 60 日；提議或連署經查對後如接近門檻但仍不足，各有一次最長 10 日補提窗口；成案後投票宣傳 28 日。每次選擇推進一個策略區塊。");
     println!(
         "負面選項包含不實／死亡連署；不會成為有效連署，並可能帶來名冊查核及信任／預算懲處。\n"
     );
@@ -709,8 +1216,17 @@ fn print_recall_intro(game: &RecallState) {
 fn print_recall_status(game: &RecallState) {
     let phase_days = match game.phase {
         RecallPhase::Proposal => game.days_elapsed,
-        RecallPhase::Signature => game.days_elapsed.saturating_sub(14),
-        RecallPhase::VoteCampaign => game.days_elapsed.saturating_sub(74),
+        RecallPhase::ProposalSupplement => game.days_elapsed.saturating_sub(14),
+        RecallPhase::Signature => game
+            .days_elapsed
+            .saturating_sub(14 + if game.proposal_supplement_used { 10 } else { 0 }),
+        RecallPhase::SignatureSupplement => game
+            .days_elapsed
+            .saturating_sub(74 + if game.proposal_supplement_used { 10 } else { 0 }),
+        RecallPhase::VoteCampaign => game.days_elapsed.saturating_sub(
+            74 + if game.proposal_supplement_used { 10 } else { 0 }
+                + if game.supplement_used { 10 } else { 0 },
+        ),
         RecallPhase::Complete => 0,
     };
     println!(
@@ -734,14 +1250,30 @@ fn print_recall_status(game: &RecallState) {
             game.opposition_trust,
             game.budget
         ),
+        RecallPhase::ProposalSupplement => println!(
+            "提議補提窗口：{} / {} 人；尚需 {} 人。已完成行政查對 {} 項（{}）；補提僅能使用一次、最長 10 日。",
+            game.proposal_count,
+            game.proposal_threshold,
+            game.proposal_threshold.saturating_sub(game.proposal_count),
+            game.administrative_checks_completed,
+            SIGNATURE_REVIEW_CHECKS.join("、")
+        ),
         RecallPhase::Signature => println!(
-            "有效連署估計：{} / {} 人　｜表面總數：{}（含不實名冊 {}；不計入有效數）　｜查核壓力 {:.0}%　｜預算 {}",
+            "有效連署估計：{} / {} 人　｜表面總數：{}（含不實名冊 {}；不計入有效數）　｜行政查對 {}/4（{}）　｜查核壓力 {:.0}%　｜預算 {}",
             game.valid_signatures(),
             game.signature_threshold,
             game.raw_signature_count(),
             game.fraudulent_signatures,
+            game.administrative_checks_completed,
+            SIGNATURE_REVIEW_CHECKS.join("、"),
             game.audit_pressure * 100.0,
             game.budget
+        ),
+        RecallPhase::SignatureSupplement => println!(
+            "一次補提窗口：有效連署 {} / {} 人；尚需 {} 人。已完成行政查對後，補提僅能使用一次、最長 10 日；現有名冊仍接受完整查核。",
+            game.valid_signatures(),
+            game.signature_threshold,
+            game.signature_threshold.saturating_sub(game.valid_signatures())
         ),
         RecallPhase::VoteCampaign => {
             let (yes, no) = game.estimated_vote_totals();
@@ -761,7 +1293,12 @@ fn print_recall_status(game: &RecallState) {
     }
 }
 
-fn run_recall_interactive(game: &mut RecallState) -> Result<bool, String> {
+fn run_recall_interactive(
+    game: &mut RecallState,
+    journal: &mut Vec<SaveCommand>,
+    save_path: Option<&str>,
+    save_config: &RecallSaveConfig,
+) -> Result<bool, String> {
     while game.phase != RecallPhase::Complete {
         print_recall_status(game);
         println!("\n【本階段行動】每次選擇代表一個跨日策略區塊，行動會觸發對手回應：");
@@ -821,16 +1358,18 @@ fn run_recall_interactive(game: &mut RecallState) -> Result<bool, String> {
         };
         match game.apply_action(action.id) {
             Ok(outcome) => {
+                journal.push(SaveCommand::RecallAction(outcome.id.index()));
+                checkpoint_recall(save_path, save_config, journal)?;
                 println!("\n✓ {}｜{}", outcome.label, outcome.note);
                 let report = outcome.report;
                 match outcome.phase_before {
-                    RecallPhase::Proposal => println!(
+                    RecallPhase::Proposal | RecallPhase::ProposalSupplement => println!(
                         "本區塊變化（含對手回應）：提議人數 {} → {} / {}。",
                         report.proposal_before,
                         report.proposal_after,
                         game.proposal_threshold
                     ),
-                    RecallPhase::Signature => println!(
+                    RecallPhase::Signature | RecallPhase::SignatureSupplement => println!(
                         "本區塊變化（含對手回應）：有效連署估計 {} → {} / {}；表面名冊仍以查對結果為準。",
                         report.valid_signatures_before,
                         report.valid_signatures_after,
@@ -866,13 +1405,25 @@ fn run_recall_auto(game: &mut RecallState) {
     while game.phase != RecallPhase::Complete {
         let action = match (game.player_side, game.phase) {
             (RecallSide::Initiator, RecallPhase::Proposal) => RecallActionId::BuildCoalition,
+            (RecallSide::Initiator, RecallPhase::ProposalSupplement) => {
+                RecallActionId::BuildCoalition
+            }
             (RecallSide::Initiator, RecallPhase::Signature) if game.blocks_elapsed == 0 => {
                 RecallActionId::BuildCoalition
             }
             (RecallSide::Initiator, RecallPhase::Signature) => RecallActionId::SignatureStations,
+            (RecallSide::Initiator, RecallPhase::SignatureSupplement) => {
+                RecallActionId::SignatureStations
+            }
             (RecallSide::Initiator, RecallPhase::VoteCampaign) => RecallActionId::FieldMobilization,
             (RecallSide::Opposition, RecallPhase::Proposal) => RecallActionId::BuildCoalition,
+            (RecallSide::Opposition, RecallPhase::ProposalSupplement) => {
+                RecallActionId::PublicDefense
+            }
             (RecallSide::Opposition, RecallPhase::Signature) => RecallActionId::LegalAudit,
+            (RecallSide::Opposition, RecallPhase::SignatureSupplement) => {
+                RecallActionId::LegalAudit
+            }
             (RecallSide::Opposition, RecallPhase::VoteCampaign) => {
                 RecallActionId::CounterMobilization
             }
@@ -922,6 +1473,11 @@ fn print_recall_result(game: &RecallState) {
             } else {
                 "違規名冊仍未計入有效連署"
             }
+        );
+    }
+    if result.ending == RecallEnding::RecallPassed {
+        println!(
+            "後續程序：目標職務出缺後須另行依法辦理補選；席次不會自動判給提議方或任何政黨。本次罷免結果不預設補選勝者。"
         );
     }
 }
@@ -1162,6 +1718,9 @@ fn run_interactive(
     game: &mut GameState,
     strategy: StrategyProfile,
     staffer_mode: bool,
+    journal: &mut Vec<SaveCommand>,
+    save_path: Option<&str>,
+    save_config: &CampaignSaveConfig,
 ) -> Result<(), String> {
     'campaign: while !game.is_finished() {
         println!(
@@ -1209,7 +1768,7 @@ fn run_interactive(
         if staffer_mode
             && game.day == 0
             && game.current_staffer_brief().is_some()
-            && !run_interactive_staffer_brief(game)?
+            && !run_interactive_staffer_brief(game, journal, save_path, save_config)?
         {
             break 'campaign;
         }
@@ -1245,11 +1804,15 @@ fn run_interactive(
                     };
                     if selection == 0 {
                         game.skip_story_beat().map_err(|error| error.to_string())?;
+                        journal.push(SaveCommand::SkipStory);
+                        checkpoint_campaign(game, save_path, save_config, journal)?;
                         println!("本段情境暫不處理；後續故事仍會依目前進度展開。\n");
                         break;
                     }
                     match game.apply_story_choice(selection - 1) {
                         Ok(outcome) => {
+                            journal.push(SaveCommand::StoryChoice(selection - 1));
+                            checkpoint_campaign(game, save_path, save_config, journal)?;
                             print_story_outcome(game, &outcome);
                             break;
                         }
@@ -1270,9 +1833,18 @@ fn run_interactive(
             break;
         };
         match game.apply_action(action_id) {
-            Ok(outcome) => print_action_outcome(game, &outcome, staffer_mode),
+            Ok(outcome) => {
+                journal.push(SaveCommand::Action(action_id.index()));
+                checkpoint_campaign(game, save_path, save_config, journal)?;
+                print_action_outcome(game, &outcome, staffer_mode)
+            }
             Err(message) => println!("{message}\n"),
         }
+    }
+    if !game.is_finished() && !game.is_settled() {
+        journal.push(SaveCommand::SettleEarly);
+        game.finish();
+        checkpoint_campaign(game, save_path, save_config, journal)?;
     }
     Ok(())
 }
@@ -1371,7 +1943,12 @@ fn print_action_details(recommendation: &StrategyRecommendation) {
     );
 }
 
-fn run_interactive_staffer_brief(game: &mut GameState) -> Result<bool, String> {
+fn run_interactive_staffer_brief(
+    game: &mut GameState,
+    journal: &mut Vec<SaveCommand>,
+    save_path: Option<&str>,
+    save_config: &CampaignSaveConfig,
+) -> Result<bool, String> {
     let Some(brief) = game.current_staffer_brief() else {
         return Ok(true);
     };
@@ -1432,11 +2009,15 @@ fn run_interactive_staffer_brief(game: &mut GameState) -> Result<bool, String> {
         if selection == 0 {
             game.skip_staffer_brief()
                 .map_err(|error| error.to_string())?;
+            journal.push(SaveCommand::SkipStaffer);
+            checkpoint_campaign(game, save_path, save_config, journal)?;
             println!("本次幕僚會議暫不處理；戰役每日行動照常繼續。\n");
             return Ok(true);
         }
         match game.apply_staffer_choice(selection - 1) {
             Ok(outcome) => {
+                journal.push(SaveCommand::StafferChoice(selection - 1));
+                checkpoint_campaign(game, save_path, save_config, journal)?;
                 print_staffer_outcome(game, &outcome);
                 return Ok(true);
             }
@@ -3093,11 +3674,13 @@ fn print_usage() {
   project-twn --scenarios [--history 相容別名]
   project-twn --regions
   project-twn --parties
-  project-twn --recall [--recall-side initiator|opposition] [--recall-template fictional|low-turnout|concentrated|high-mobilization] [--seed 整數] [--auto]
+  project-twn --roster-editor 名冊.tsv
+  project-twn --recall [--recall-side initiator|opposition] [--recall-template fictional|low-turnout|concentrated|high-mobilization] [--seed 整數] [--auto] [--save 存檔.tsv]
   project-twn --simulate [年份] [--region 地區] [--party 政黨] [--role incumbent|challenger]
       [--style balanced|policy|organizer|communicator] [--strategy balanced|persuasion|issue|mobilization|trust|sustainable|hardball]
       [--difficulty story|standard|hard] [--event-pack all|democracy|cross-strait|local|media] [--timeline weekly|date]
-      [--primary | --staffer] [--seed 整數] [--auto] [--log 檔案.tsv]
+      [--primary | --staffer] [--roster 名冊.tsv] [--seed 整數] [--auto] [--log 檔案.tsv] [--save 存檔.tsv]
+  project-twn --load 存檔.tsv
   project-twn --batch 場數 --role incumbent|challenger [--style 風格] [--strategy 策略]
       [--sweep-styles | --sweep-strategies | --sensitivity | --interaction-sensitivity]
       [--year 年份] [--region 地區] [--party 政黨] [--seed 起始值] [--batch-log 原始跑次.tsv]
@@ -3106,6 +3689,9 @@ fn print_usage() {
   cargo run -- --simulate 2024 --role challenger --style organizer --seed 42
   cargo run -- --simulate 2024 --role challenger --difficulty story --event-pack democracy --timeline date
   cargo run -- --year 2024 --role challenger --staffer --seed 42
+  cargo run -- --year 2024 --role challenger --save campaign.tsv
+  cargo run -- --load campaign.tsv
+  cargo run -- --roster-editor roster.tsv
   cargo run -- --recall --recall-side initiator --recall-template high-mobilization --seed 42
   cargo run -- --year 2026 --region 霧川市 --role challenger --party 山海自治黨 --strategy issue --seed 7 --auto
   cargo run -- --batch 1000 --year 2024 --role challenger --seed 1000 --sweep-styles --batch-log batch.tsv
@@ -3117,6 +3703,8 @@ fn print_usage() {
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 --staffer 開啟幕僚模式：設定競選主軸，並在六個關鍵週處理陳情、地方協調、事件回應、支持度檢視與最後布局；幕僚決策不占每日行動，但會消耗預算及影響遊戲資源。此單場模式目前不支援 --batch 或 --primary。
 --recall 開啟人民罷免模式：在罷免提議／連署方或反對罷免方之間選擇，進行 14 日提議、60 日連署與 28 日投票宣傳；可選虛構的低投票參與、集中支持或高強度動員盤型。本模式不含彈劾；遊戲中人物與事件皆採虛構合成，不對應真實對象。不實／死亡連署是違規高風險行動，不計入有效連署，遭查核會受遊戲內懲處。
+--roster-editor 會建立 2–5 人的虛構候選人名冊 TSV；--roster 可將姓名、虛構政黨及起始支持度套用到單場戰役。名冊只接受內建虛構政黨，須明確指定唯一一位玩家候選人。
+--save 會在互動戰役開始及每次有效決策後原子更新版本化 TSV 存檔；--load 會依固定 seed 重播決策紀錄後接續遊玩，適用候選人、幕僚及罷免模式。自動示範與批次模式不支援存檔；舊版或未知版本存檔會拒絕載入。
 難度可選故事／標準／挑戰；事件包可篩選制度參與、區域安全、地方民生或媒體信任等虛構議題；--timeline date 會將虛構事件的遊戲日期錨點映射到 12 週戰役日曆，沒有錨點的週次留白。
 省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。

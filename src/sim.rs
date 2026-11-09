@@ -1,8 +1,8 @@
 use crate::campaign::{anniversary_day_offset, CampaignSetup, EventTimeline, DATED_EVENTS};
 use crate::game_content::{
-    baseline_election, challenger_candidate_index, events_for_campaign, incumbent_candidate_index,
-    party_affinity, ElectionScenario, EventCard, Issue, PartyProfile, RegionProfile,
-    VOTER_SEGMENTS,
+    baseline_election, challenger_candidate_index, events_for_campaign, find_party,
+    incumbent_candidate_index, party_affinity, ElectionScenario, EventCard, Issue, PartyProfile,
+    RegionProfile, VOTER_SEGMENTS,
 };
 use crate::governance::GovernmentOpinion;
 use crate::staffer::{
@@ -1216,6 +1216,54 @@ impl Rng {
 }
 
 impl GameState {
+    /// Replace the scenario slate before play begins. Parties must belong to
+    /// the game's fictional registry; personal support values are normalized.
+    pub fn apply_candidate_roster(
+        &mut self,
+        entries: &[(String, &'static str, f64)],
+        player_index: usize,
+    ) -> Result<(), &'static str> {
+        if self.round != 0 || self.day != 0 || self.final_outcome.is_some() {
+            return Err("candidate rosters can only be applied before the first campaign day");
+        }
+        if !(2..=5).contains(&entries.len()) || player_index >= entries.len() {
+            return Err("candidate roster must contain 2..=5 candidates and a valid player slot");
+        }
+        if entries.iter().any(|(name, party, share)| {
+            name.trim().chars().count() < 2
+                || name.trim().chars().count() > 24
+                || name.chars().any(char::is_control)
+                || party.is_empty()
+                || find_party(party).is_none()
+                || !share.is_finite()
+                || !(0.0..=100.0).contains(share)
+        }) {
+            return Err("candidate roster contains an invalid name, party, or support value");
+        }
+        let total: f64 = entries.iter().map(|entry| entry.2).sum();
+        if !total.is_finite() || total <= 0.0 {
+            return Err("candidate roster must have a positive finite support total");
+        }
+        let normalized: Vec<f64> = entries
+            .iter()
+            .map(|entry| entry.2 / total * 100.0)
+            .collect();
+        self.candidates = entries
+            .iter()
+            .zip(&normalized)
+            .map(|((name, party, _), share)| SimCandidate {
+                name: name.clone(),
+                party,
+                starting_share: *share,
+            })
+            .collect();
+        self.polls = normalized;
+        self.player_index = player_index;
+        self.voter_segments = make_voter_segments(&self.polls);
+        self.final_outcome = None;
+        self.validate()
+    }
+
     pub fn new(campaign_year: u16, side: Side, seed: u64) -> Self {
         Self::new_with_style(campaign_year, side, seed, CampaignStyle::Balanced)
     }
@@ -1328,24 +1376,13 @@ impl GameState {
         model_parameters: ModelParameters,
         setup: CampaignSetup,
     ) -> Self {
-        let mut game = Self::from_election(
-            campaign_year,
-            side,
-            baseline_election(2024),
-            seed,
-            style,
-            model_parameters,
-            setup,
-        );
-        game.baseline_year = 2024;
-        game.region = Some(region);
         let (mut parties, shares) = local_slate(region);
         if let Some(selected_party) = selected_party {
             if !parties.contains(&selected_party.name) {
                 parties[2] = selected_party.name;
             }
         }
-        game.candidates = parties
+        let candidates = parties
             .iter()
             .zip(shares)
             .map(|(party, share)| SimCandidate {
@@ -1354,15 +1391,25 @@ impl GameState {
                 starting_share: share,
             })
             .collect();
-        game.polls = shares.to_vec();
-        game.voter_segments = make_voter_segments(&game.polls);
-        game.player_index = match side {
+        let player_index = match side {
             Side::Incumbent => 0,
             Side::Challenger => selected_party
                 .and_then(|party| parties.iter().position(|name| *name == party.name))
                 .unwrap_or(1),
         };
-        game
+        Self::from_candidates(
+            campaign_year,
+            2024,
+            side,
+            seed,
+            style,
+            model_parameters,
+            setup,
+            Some(region),
+            candidates,
+            player_index,
+            "2026-10-24",
+        )
     }
 
     fn from_election(
@@ -1392,6 +1439,35 @@ impl GameState {
                 starting_share: result.share_pct,
             })
             .collect();
+        Self::from_candidates(
+            campaign_year,
+            election.year,
+            side,
+            seed,
+            style,
+            model_parameters,
+            setup,
+            None,
+            candidates,
+            player_index,
+            election.date,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_candidates(
+        campaign_year: u16,
+        baseline_year: u16,
+        side: Side,
+        seed: u64,
+        style: CampaignStyle,
+        model_parameters: ModelParameters,
+        setup: CampaignSetup,
+        region: Option<&'static RegionProfile>,
+        candidates: Vec<SimCandidate>,
+        player_index: usize,
+        baseline_date: &'static str,
+    ) -> Self {
         let mut polls: Vec<f64> = candidates
             .iter()
             .map(|candidate| candidate.starting_share)
@@ -1411,12 +1487,12 @@ impl GameState {
                 .map(Some)
                 .collect(),
             EventTimeline::AnniversaryMapped => {
-                let election_date = if campaign_year == election.year {
-                    election.date
+                let election_date = if campaign_year == baseline_year {
+                    baseline_date
                 } else if campaign_year == 2026 {
                     "2026-10-24"
                 } else {
-                    election.date
+                    baseline_date
                 };
                 make_anniversary_event_schedule(&events, election_date)
             }
@@ -1425,8 +1501,8 @@ impl GameState {
 
         Self {
             campaign_year,
-            baseline_year: election.year,
-            region: None,
+            baseline_year,
+            region,
             side,
             style,
             setup,

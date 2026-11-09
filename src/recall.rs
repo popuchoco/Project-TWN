@@ -8,6 +8,8 @@ use std::fmt;
 pub const PROPOSAL_DAYS: u16 = 14;
 pub const SIGNATURE_DAYS: u16 = 60;
 pub const VOTE_CAMPAIGN_DAYS: u16 = 28;
+pub const SUPPLEMENT_DAYS: u16 = 10;
+pub const SIGNATURE_REVIEW_CHECKS: [&str; 4] = ["身分核對", "罷免資格", "重複簽署", "名冊完整性"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecallSide {
@@ -16,6 +18,13 @@ pub enum RecallSide {
 }
 
 impl RecallSide {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Initiator => "initiator",
+            Self::Opposition => "opposition",
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Initiator => "罷免提議／連署方",
@@ -53,6 +62,13 @@ impl RecallTemplate {
             Self::LowTurnoutThreshold => "阮之禾",
             Self::ConcentratedSupport => "卓聞川",
             Self::HighMobilization => "顧以沐",
+        }
+    }
+
+    pub const fn eligibility(self) -> RecallEligibility {
+        RecallEligibility {
+            office: RecallOffice::ConstituencyLegislator,
+            months_in_office: 18,
         }
     }
 
@@ -156,9 +172,29 @@ impl RecallTemplate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecallOffice {
+    ConstituencyLegislator,
+    PartyListLegislator,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecallEligibility {
+    pub office: RecallOffice,
+    pub months_in_office: u16,
+}
+
+impl RecallEligibility {
+    pub const fn is_eligible(self) -> bool {
+        matches!(self.office, RecallOffice::ConstituencyLegislator) && self.months_in_office >= 12
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecallPhase {
     Proposal,
+    ProposalSupplement,
     Signature,
+    SignatureSupplement,
     VoteCampaign,
     Complete,
 }
@@ -167,7 +203,9 @@ impl RecallPhase {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Proposal => "第一階段｜提議",
+            Self::ProposalSupplement => "行政查對｜提議補提",
             Self::Signature => "第二階段｜連署",
+            Self::SignatureSupplement => "行政查對｜一次補提",
             Self::VoteCampaign => "第三階段｜罷免投票宣傳",
             Self::Complete => "本案已結束",
         }
@@ -176,7 +214,9 @@ impl RecallPhase {
     const fn blocks(self) -> u8 {
         match self {
             Self::Proposal => 2,
+            Self::ProposalSupplement => 1,
             Self::Signature => 6,
+            Self::SignatureSupplement => 1,
             Self::VoteCampaign => 4,
             Self::Complete => 0,
         }
@@ -185,7 +225,9 @@ impl RecallPhase {
     const fn block_days(self) -> u16 {
         match self {
             Self::Proposal => 7,
+            Self::ProposalSupplement => SUPPLEMENT_DAYS,
             Self::Signature => 10,
+            Self::SignatureSupplement => SUPPLEMENT_DAYS,
             Self::VoteCampaign => 7,
             Self::Complete => 0,
         }
@@ -194,7 +236,9 @@ impl RecallPhase {
     const fn max_days(self) -> u16 {
         match self {
             Self::Proposal => PROPOSAL_DAYS,
+            Self::ProposalSupplement => SUPPLEMENT_DAYS,
             Self::Signature => SIGNATURE_DAYS,
+            Self::SignatureSupplement => SUPPLEMENT_DAYS,
             Self::VoteCampaign => VOTE_CAMPAIGN_DAYS,
             Self::Complete => 0,
         }
@@ -220,9 +264,26 @@ pub enum RecallActionId {
 }
 
 impl RecallActionId {
+    pub const ALL: [Self; 14] = [
+        Self::BuildCoalition,
+        Self::CommunityListening,
+        Self::EvidenceBriefing,
+        Self::SignatureStations,
+        Self::DoorToDoor,
+        Self::PublicForum,
+        Self::FieldMobilization,
+        Self::PublicDefense,
+        Self::LocalService,
+        Self::CounterMobilization,
+        Self::QuietDeescalation,
+        Self::LegalAudit,
+        Self::FalseSignatures,
+        Self::DeceasedSignatures,
+    ];
+
     const COUNT: usize = 14;
 
-    const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::BuildCoalition => 0,
             Self::CommunityListening => 1,
@@ -412,6 +473,9 @@ pub struct RecallState {
     pub budget: u8,
     pub days_elapsed: u16,
     pub blocks_elapsed: u8,
+    pub supplement_used: bool,
+    pub proposal_supplement_used: bool,
+    pub administrative_checks_completed: u8,
     pub result: Option<RecallResult>,
     seed: u64,
     action_uses: [[u8; RecallActionId::COUNT]; 2],
@@ -480,6 +544,9 @@ impl RecallState {
             budget: 70,
             days_elapsed: 0,
             blocks_elapsed: 0,
+            supplement_used: false,
+            proposal_supplement_used: false,
+            administrative_checks_completed: 0,
             result: None,
             seed: if seed == 0 {
                 0x5457_4e52_4543_414c
@@ -494,6 +561,10 @@ impl RecallState {
         (self.genuine_signatures as f64 * self.signature_quality)
             .floor()
             .max(0.0) as u64
+    }
+
+    pub fn target_is_eligible(&self) -> bool {
+        self.template.eligibility().is_eligible()
     }
 
     pub fn raw_signature_count(&self) -> u64 {
@@ -547,6 +618,18 @@ impl RecallState {
                 RecallActionId::EvidenceBriefing
             ) | (
                 RecallSide::Initiator,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::BuildCoalition
+            ) | (
+                RecallSide::Initiator,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::CommunityListening
+            ) | (
+                RecallSide::Initiator,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::EvidenceBriefing
+            ) | (
+                RecallSide::Initiator,
                 RecallPhase::Signature,
                 RecallActionId::BuildCoalition
             ) | (
@@ -577,6 +660,18 @@ impl RecallState {
                 RecallSide::Initiator,
                 RecallPhase::Signature,
                 RecallActionId::DeceasedSignatures
+            ) | (
+                RecallSide::Initiator,
+                RecallPhase::SignatureSupplement,
+                RecallActionId::EvidenceBriefing
+            ) | (
+                RecallSide::Initiator,
+                RecallPhase::SignatureSupplement,
+                RecallActionId::SignatureStations
+            ) | (
+                RecallSide::Initiator,
+                RecallPhase::SignatureSupplement,
+                RecallActionId::DoorToDoor
             ) | (
                 RecallSide::Initiator,
                 RecallPhase::VoteCampaign,
@@ -611,6 +706,22 @@ impl RecallState {
                 RecallActionId::CommunityListening
             ) | (
                 RecallSide::Opposition,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::PublicDefense
+            ) | (
+                RecallSide::Opposition,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::LocalService
+            ) | (
+                RecallSide::Opposition,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::BuildCoalition
+            ) | (
+                RecallSide::Opposition,
+                RecallPhase::ProposalSupplement,
+                RecallActionId::CommunityListening
+            ) | (
+                RecallSide::Opposition,
                 RecallPhase::Signature,
                 RecallActionId::PublicDefense
             ) | (
@@ -628,6 +739,18 @@ impl RecallState {
             ) | (
                 RecallSide::Opposition,
                 RecallPhase::Signature,
+                RecallActionId::LegalAudit
+            ) | (
+                RecallSide::Opposition,
+                RecallPhase::SignatureSupplement,
+                RecallActionId::PublicDefense
+            ) | (
+                RecallSide::Opposition,
+                RecallPhase::SignatureSupplement,
+                RecallActionId::LocalService
+            ) | (
+                RecallSide::Opposition,
+                RecallPhase::SignatureSupplement,
                 RecallActionId::LegalAudit
             ) | (
                 RecallSide::Opposition,
@@ -744,7 +867,10 @@ impl RecallState {
             (RecallSide::Initiator, RecallActionId::BuildCoalition) => {
                 self.volunteer_capacity = (self.volunteer_capacity + 13.0).min(100.0);
                 self.initiator_trust = (self.initiator_trust + 2.0).min(100.0);
-                if self.phase == RecallPhase::Proposal {
+                if matches!(
+                    self.phase,
+                    RecallPhase::Proposal | RecallPhase::ProposalSupplement
+                ) {
                     self.proposal_count = self.proposal_count.saturating_add(
                         (self.electorate as f64 * 0.0055 * repeat_factor).round() as u64,
                     );
@@ -755,7 +881,10 @@ impl RecallState {
                 self.increase_yes_intention(0.55 * repeat_factor);
                 self.initiator_trust = (self.initiator_trust + 1.4).min(100.0);
                 self.volunteer_capacity = (self.volunteer_capacity + 4.0).min(100.0);
-                if self.phase == RecallPhase::Proposal {
+                if matches!(
+                    self.phase,
+                    RecallPhase::Proposal | RecallPhase::ProposalSupplement
+                ) {
                     self.proposal_count = self.proposal_count.saturating_add(
                         (self.electorate as f64 * 0.0035 * repeat_factor).round() as u64,
                     );
@@ -767,7 +896,10 @@ impl RecallState {
                 self.increase_yes_intention(0.85 * repeat_factor);
                 self.target_record = (self.target_record - 1.4 * repeat_factor).max(0.0);
                 self.signature_quality = (self.signature_quality + 0.015).min(0.995);
-                if self.phase == RecallPhase::Proposal {
+                if matches!(
+                    self.phase,
+                    RecallPhase::Proposal | RecallPhase::ProposalSupplement
+                ) {
                     self.proposal_count = self.proposal_count.saturating_add(
                         (self.electorate as f64 * 0.0025 * repeat_factor).round() as u64,
                     );
@@ -905,19 +1037,23 @@ impl RecallState {
         match side {
             RecallSide::Initiator => match self.phase {
                 RecallPhase::Proposal => RecallActionId::BuildCoalition,
+                RecallPhase::ProposalSupplement => RecallActionId::BuildCoalition,
                 RecallPhase::Signature if self.blocks_elapsed == 0 => {
                     RecallActionId::BuildCoalition
                 }
                 RecallPhase::Signature => RecallActionId::SignatureStations,
+                RecallPhase::SignatureSupplement => RecallActionId::SignatureStations,
                 RecallPhase::VoteCampaign => RecallActionId::FieldMobilization,
                 RecallPhase::Complete => RecallActionId::EvidenceBriefing,
             },
             RecallSide::Opposition => match (self.template, self.phase) {
                 (_, RecallPhase::Proposal) => RecallActionId::PublicDefense,
+                (_, RecallPhase::ProposalSupplement) => RecallActionId::PublicDefense,
                 (RecallTemplate::HighMobilization, RecallPhase::Signature) => {
                     RecallActionId::QuietDeescalation
                 }
                 (_, RecallPhase::Signature) => RecallActionId::LegalAudit,
+                (_, RecallPhase::SignatureSupplement) => RecallActionId::LegalAudit,
                 (RecallTemplate::LowTurnoutThreshold, RecallPhase::VoteCampaign) => {
                     RecallActionId::PublicForum
                 }
@@ -941,17 +1077,40 @@ impl RecallState {
         }
         match self.phase {
             RecallPhase::Proposal => {
-                if self.proposal_count < self.proposal_threshold {
+                self.administrative_checks_completed = SIGNATURE_REVIEW_CHECKS.len() as u8;
+                if self.proposal_count >= self.proposal_threshold {
+                    self.phase = RecallPhase::Signature;
+                    self.administrative_checks_completed = 0;
+                    self.blocks_elapsed = 0;
+                } else if self.proposal_count.saturating_mul(10)
+                    >= self.proposal_threshold.saturating_mul(9)
+                    && !self.proposal_supplement_used
+                {
+                    self.phase = RecallPhase::ProposalSupplement;
+                    self.proposal_supplement_used = true;
+                    self.blocks_elapsed = 0;
+                } else {
                     self.finish_without_vote(
                         RecallEnding::ProposalFailed,
                         "提議人數未達選舉人總數 1% 門檻。",
                     );
-                } else {
+                }
+            }
+            RecallPhase::ProposalSupplement => {
+                self.administrative_checks_completed = SIGNATURE_REVIEW_CHECKS.len() as u8;
+                if self.proposal_count >= self.proposal_threshold {
                     self.phase = RecallPhase::Signature;
+                    self.administrative_checks_completed = 0;
                     self.blocks_elapsed = 0;
+                } else {
+                    self.finish_without_vote(
+                        RecallEnding::ProposalFailed,
+                        "一次補提後，提議人數仍未達選舉人總數 1% 門檻。",
+                    );
                 }
             }
             RecallPhase::Signature => {
+                self.administrative_checks_completed = SIGNATURE_REVIEW_CHECKS.len() as u8;
                 if self.fraud_attempts > 0 {
                     let exposure_chance =
                         (0.18 + self.fraud_attempts as f64 * 0.24 + self.audit_pressure)
@@ -963,14 +1122,32 @@ impl RecallState {
                         self.budget = self.budget.saturating_sub(18);
                     }
                 }
-                if self.valid_signatures() < self.signature_threshold {
+                if self.valid_signatures() >= self.signature_threshold {
+                    self.phase = RecallPhase::VoteCampaign;
+                    self.blocks_elapsed = 0;
+                } else if self.genuine_signatures >= self.signature_threshold
+                    && !self.supplement_used
+                {
+                    self.phase = RecallPhase::SignatureSupplement;
+                    self.supplement_used = true;
+                    self.blocks_elapsed = 0;
+                } else {
                     self.finish_without_vote(
                         RecallEnding::SignaturesFailed,
                         "查對後的有效連署未達選舉人總數 10% 門檻。",
                     );
-                } else {
+                }
+            }
+            RecallPhase::SignatureSupplement => {
+                self.administrative_checks_completed = SIGNATURE_REVIEW_CHECKS.len() as u8;
+                if self.valid_signatures() >= self.signature_threshold {
                     self.phase = RecallPhase::VoteCampaign;
                     self.blocks_elapsed = 0;
+                } else {
+                    self.finish_without_vote(
+                        RecallEnding::SignaturesFailed,
+                        "一次補提後，查對有效連署仍未達選舉人總數 10% 門檻。",
+                    );
                 }
             }
             RecallPhase::VoteCampaign => self.finish_vote(),
@@ -1065,6 +1242,14 @@ impl RecallState {
         if self.yes_intention_pct + self.no_intention_pct > 100.0 + f64::EPSILON {
             return Err("yes and no intention cannot exceed the electorate together");
         }
+        if self.administrative_checks_completed as usize > SIGNATURE_REVIEW_CHECKS.len()
+            || (self.phase == RecallPhase::ProposalSupplement && !self.proposal_supplement_used)
+            || (self.phase == RecallPhase::SignatureSupplement && !self.supplement_used)
+            || self.days_elapsed
+                > PROPOSAL_DAYS + 2 * SUPPLEMENT_DAYS + SIGNATURE_DAYS + VOTE_CAMPAIGN_DAYS
+        {
+            return Err("recall review progress is outside the configured process");
+        }
         if self.phase == RecallPhase::Complete && self.result.is_none() {
             return Err("a completed recall campaign must have a result");
         }
@@ -1138,6 +1323,26 @@ mod tests {
     }
 
     #[test]
+    fn recall_targets_are_eligible_district_members_who_have_served_longer_than_one_year() {
+        for template in RecallTemplate::ALL {
+            let eligibility = template.eligibility();
+            assert_eq!(eligibility.office, RecallOffice::ConstituencyLegislator);
+            assert!(eligibility.months_in_office >= 12);
+            assert!(eligibility.is_eligible());
+        }
+        assert!(!RecallEligibility {
+            office: RecallOffice::PartyListLegislator,
+            months_in_office: 24,
+        }
+        .is_eligible());
+        assert!(!RecallEligibility {
+            office: RecallOffice::ConstituencyLegislator,
+            months_in_office: 11,
+        }
+        .is_eligible());
+    }
+
+    #[test]
     fn recall_target_profile_changes_with_evidence_and_public_defense() {
         let mut initiator = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 100);
         let baseline = initiator.target_record;
@@ -1194,6 +1399,57 @@ mod tests {
         }
         assert_eq!(state.days_elapsed, PROPOSAL_DAYS + SIGNATURE_DAYS);
         assert_eq!(state.phase, RecallPhase::VoteCampaign);
+    }
+
+    #[test]
+    fn near_threshold_proposal_gets_one_ten_day_supplement() {
+        let mut state = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 79);
+        state.proposal_count = state.proposal_threshold - 600;
+        state.blocks_elapsed = 1;
+        state.days_elapsed = 7;
+        let outcome = state.apply_action(RecallActionId::BuildCoalition).unwrap();
+
+        assert_eq!(outcome.phase_after, RecallPhase::ProposalSupplement);
+        assert_eq!(state.days_elapsed, PROPOSAL_DAYS);
+        assert!(state.proposal_supplement_used);
+        assert_eq!(state.current_days_limit(), SUPPLEMENT_DAYS);
+        assert!(state.validate().is_ok());
+
+        let outcome = state.apply_action(RecallActionId::BuildCoalition).unwrap();
+        assert_eq!(outcome.phase_after, RecallPhase::Signature);
+        assert_eq!(state.days_elapsed, PROPOSAL_DAYS + SUPPLEMENT_DAYS);
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn verified_signature_shortfall_gets_one_ten_day_supplement_then_continues() {
+        let mut state = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 80);
+        reach_signature_phase(&mut state);
+        state.genuine_signatures = state.signature_threshold;
+        state.signature_quality = 0.96;
+        state.blocks_elapsed = 5;
+        state.days_elapsed = PROPOSAL_DAYS + 50;
+        state
+            .apply_action(RecallActionId::EvidenceBriefing)
+            .unwrap();
+        assert_eq!(state.phase, RecallPhase::SignatureSupplement);
+        assert!(state.supplement_used);
+        assert_eq!(state.days_elapsed, PROPOSAL_DAYS + SIGNATURE_DAYS);
+        assert_eq!(state.current_days_limit(), SUPPLEMENT_DAYS);
+        assert!(state
+            .action_options()
+            .iter()
+            .any(|action| action.id == RecallActionId::SignatureStations));
+
+        state
+            .apply_action(RecallActionId::SignatureStations)
+            .unwrap();
+        assert_eq!(state.phase, RecallPhase::VoteCampaign);
+        assert_eq!(
+            state.days_elapsed,
+            PROPOSAL_DAYS + SIGNATURE_DAYS + SUPPLEMENT_DAYS
+        );
+        assert!(state.validate().is_ok());
     }
 
     #[test]

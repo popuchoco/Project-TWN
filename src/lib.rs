@@ -1,8 +1,14 @@
 pub mod campaign;
+pub mod election_night;
+pub mod electoral;
 pub mod game_content;
 pub mod governance;
+pub mod local_content;
+pub mod presidential_content;
 pub mod primary;
 pub mod recall;
+pub mod roster;
+pub mod savegame;
 pub mod sim;
 pub mod staffer;
 pub mod story;
