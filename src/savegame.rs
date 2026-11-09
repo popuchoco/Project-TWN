@@ -7,7 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-const HEADER: &str = "PROJECT_TWN_SAVE\t1";
+const HEADER_V1: &str = "PROJECT_TWN_SAVE\t1";
+const HEADER: &str = "PROJECT_TWN_SAVE\t2";
 const MAX_SAVE_BYTES: u64 = 1_000_000;
 const MAX_COMMANDS: usize = 2_000;
 
@@ -45,6 +46,8 @@ pub enum SaveCommand {
     Action(usize),
     StoryChoice(usize),
     SkipStory,
+    LocalStoryChoice(usize),
+    SkipLocalStory,
     StafferChoice(usize),
     SkipStaffer,
     RecallAction(usize),
@@ -67,9 +70,11 @@ impl SaveGame {
         let contents =
             fs::read_to_string(path).map_err(|error| format!("無法讀取存檔：{error}"))?;
         let mut lines = contents.lines();
-        if lines.next() != Some(HEADER) {
-            return Err("存檔版本不支援；此版本僅能讀取 PROJECT_TWN_SAVE 1。".to_string());
-        }
+        let version = match lines.next() {
+            Some(HEADER_V1) => 1,
+            Some(HEADER) => 2,
+            _ => return Err("存檔版本不支援；此版本可讀取 PROJECT_TWN_SAVE 1／2。".to_string()),
+        };
         let mut values = HashMap::new();
         let mut candidates = Vec::new();
         let mut commands = Vec::new();
@@ -120,6 +125,12 @@ impl SaveGame {
                         "action" if index < 30 => SaveCommand::Action(index),
                         "story" if index < 4 => SaveCommand::StoryChoice(index),
                         "skip_story" if index == 0 => SaveCommand::SkipStory,
+                        "local_story" if version >= 2 && index < 3 => {
+                            SaveCommand::LocalStoryChoice(index)
+                        }
+                        "skip_local_story" if version >= 2 && index == 0 => {
+                            SaveCommand::SkipLocalStory
+                        }
                         "staffer" if index < 4 => SaveCommand::StafferChoice(index),
                         "skip_staffer" if index == 0 => SaveCommand::SkipStaffer,
                         "recall" if index < 14 => SaveCommand::RecallAction(index),
@@ -318,6 +329,8 @@ fn write_body(file: &mut impl Write, save: &SaveGame) -> std::io::Result<()> {
             SaveCommand::Action(index) => ("action", *index),
             SaveCommand::StoryChoice(index) => ("story", *index),
             SaveCommand::SkipStory => ("skip_story", 0),
+            SaveCommand::LocalStoryChoice(index) => ("local_story", *index),
+            SaveCommand::SkipLocalStory => ("skip_local_story", 0),
             SaveCommand::StafferChoice(index) => ("staffer", *index),
             SaveCommand::SkipStaffer => ("skip_staffer", 0),
             SaveCommand::RecallAction(index) => ("recall", *index),
@@ -421,7 +434,12 @@ mod tests {
                     ],
                 }),
             }),
-            commands: vec![SaveCommand::StoryChoice(2), SaveCommand::Action(3)],
+            commands: vec![
+                SaveCommand::StoryChoice(2),
+                SaveCommand::LocalStoryChoice(1),
+                SaveCommand::SkipLocalStory,
+                SaveCommand::Action(3),
+            ],
         }
     }
 
@@ -436,12 +454,31 @@ mod tests {
     }
 
     #[test]
+    fn version_one_saves_remain_readable_after_local_story_journal_extension() {
+        let path =
+            std::env::temp_dir().join(format!("project-twn-save-v1-{}.tsv", std::process::id()));
+        let mut value = sample();
+        value.commands.retain(|command| {
+            !matches!(
+                command,
+                SaveCommand::LocalStoryChoice(_) | SaveCommand::SkipLocalStory
+            )
+        });
+        value.write(&path).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let version_one = contents.replacen("PROJECT_TWN_SAVE\t2", "PROJECT_TWN_SAVE\t1", 1);
+        std::fs::write(&path, version_one).unwrap();
+        assert_eq!(SaveGame::read(&path).unwrap(), value);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn save_reader_rejects_unknown_version_and_mixed_command_types() {
         let path = std::env::temp_dir().join(format!(
             "project-twn-invalid-save-{}.tsv",
             std::process::id()
         ));
-        std::fs::write(&path, "PROJECT_TWN_SAVE\t2\n").unwrap();
+        std::fs::write(&path, "PROJECT_TWN_SAVE\t3\n").unwrap();
         assert!(SaveGame::read(&path).is_err());
         let _ = std::fs::remove_file(path);
     }

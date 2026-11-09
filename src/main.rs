@@ -384,7 +384,8 @@ fn print_election_night(
 ) -> Result<(), String> {
     if let Some(region) = game.region {
         println!(
-            "\n地方故事收束：{}",
+            "\n地方故事收束：{}｜{}",
+            region.name,
             game.local_story_progress.ending_reflection(region)
         );
         println!(
@@ -589,6 +590,13 @@ fn replay_campaign(game: &mut GameState, commands: &[SaveCommand]) -> Result<(),
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
             SaveCommand::SkipStory => game.skip_story_beat().map_err(|error| error.to_string()),
+            SaveCommand::LocalStoryChoice(choice) => game
+                .apply_local_story_choice(*choice)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            SaveCommand::SkipLocalStory => game
+                .skip_local_story_beat()
+                .map_err(|error| error.to_string()),
             SaveCommand::StafferChoice(choice) => game
                 .apply_staffer_choice(*choice)
                 .map(|_| ())
@@ -1971,6 +1979,54 @@ fn run_interactive(
                 }
             }
         }
+        if let Some(beat) = game.current_local_story_beat() {
+            println!("\n【地方故事決策｜第 {} 週｜{}】", beat.week, beat.title);
+            println!("登場人物：{}", beat.character);
+            println!("{}", beat.scene);
+            println!("（地方角色與情境為虛構合成素材；選擇會影響資源、人物關係與故事結局，不耗用每日行動。）");
+            loop {
+                for (index, choice) in beat.choices.iter().enumerate() {
+                    println!(
+                        "  {}) {}｜預算 {}｜支持度 {:+.2}｜團隊信任 {:+.1}｜動員 {:+.1}｜體力 {:+.1}{}",
+                        index + 1,
+                        choice.label,
+                        choice.budget_cost,
+                        choice.support_delta,
+                        choice.trust_delta,
+                        choice.mobilization_delta,
+                        choice.stamina_delta,
+                        if choice.budget_cost > game.budget { "（預算不足）" } else { "" }
+                    );
+                    println!("     {}", choice.description);
+                }
+                let Some(selection) = select_story_choice(beat.choices.len())? else {
+                    break 'campaign;
+                };
+                if selection == 0 {
+                    game.skip_local_story_beat()
+                        .map_err(|error| error.to_string())?;
+                    journal.push(SaveCommand::SkipLocalStory);
+                    checkpoint_campaign(game, save_path, save_config, journal)?;
+                    println!("地方情境先略過；相關人物關係與未完成承諾會保留在故事進度中。\n");
+                    break;
+                }
+                match game.apply_local_story_choice(selection - 1) {
+                    Ok(outcome) => {
+                        journal.push(SaveCommand::LocalStoryChoice(selection - 1));
+                        checkpoint_campaign(game, save_path, save_config, journal)?;
+                        print_local_story_outcome(game, &outcome);
+                        break;
+                    }
+                    Err(error @ GameError::InsufficientBudget { .. }) => {
+                        println!("{error}\n請改選其他解法或暫不處理。\n");
+                    }
+                    Err(error) => {
+                        println!("{error}\n");
+                        break;
+                    }
+                }
+            }
+        }
         let recommendations = strategy_engine_for(game, strategy, staffer_mode).rank_actions(game);
         let selected = select_interactive_action(game, &recommendations)?;
         let Some(action_id) = selected else {
@@ -2234,8 +2290,10 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
     }
     if !staffer_mode {
         if let Some(region) = game.region {
-            if let Some(echo) = game.local_story_progress.callback(week, day, region) {
-                println!("地方故事回訪：{echo}");
+            if !matches!(week, 3 | 6 | 9 | 12) {
+                if let Some(echo) = game.local_story_progress.callback(week, day, region) {
+                    println!("地方故事回訪：{echo}");
+                }
             }
         }
     }
@@ -2330,6 +2388,32 @@ fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
         outcome.budget_after
     );
     println!("人物記憶更新：{}", game.story_progress.memory_summary());
+    if let Some(note) = outcome.note {
+        println!("  {note}");
+    }
+}
+
+fn print_local_story_outcome(game: &GameState, outcome: &StoryOutcome) {
+    let candidate_name = &game.candidates[game.player_index].name;
+    println!(
+        "✓【地方故事已選】{}｜{}：{} 支持度 {:.2}% → {:.2}%（{:+.2} 點），團隊信任 {:.1}、動員 {:.1}、體力 {:.1}、預算 {}",
+        outcome.title,
+        outcome.choice_label,
+        candidate_name,
+        outcome.support_before,
+        outcome.support_after,
+        outcome.support_delta,
+        outcome.trust_after,
+        outcome.mobilization_after,
+        outcome.stamina_after,
+        outcome.budget_after
+    );
+    if let Some(region) = game.region {
+        println!(
+            "地方關係更新：{}",
+            game.local_story_progress.summary(region)
+        );
+    }
     if let Some(note) = outcome.note {
         println!("  {note}");
     }
@@ -2659,6 +2743,42 @@ fn run_auto_mode(
                     if show_progress {
                         println!("本段情境因預算不足而暫不處理；後續劇情仍會依目前進度展開。\n");
                     }
+                }
+            }
+        }
+        if let Some(beat) = game.current_local_story_beat() {
+            if show_progress {
+                println!("\n【地方故事決策｜第 {} 週｜{}】", beat.week, beat.title);
+                println!("登場人物：{}", beat.character);
+                println!("{}", beat.scene);
+                println!("（地方角色與情境為虛構合成素材；選擇會影響資源、人物關係與故事結局。）");
+            }
+            let selected = beat
+                .choices
+                .iter()
+                .enumerate()
+                .filter(|(_, choice)| choice.budget_cost <= game.budget)
+                .max_by(|(_, left), (_, right)| {
+                    let score = |choice: &project_twn::local_story::LocalStoryChoiceSpec| {
+                        choice.support_delta * 3.0
+                            + choice.trust_delta * 0.08
+                            + choice.mobilization_delta * 0.05
+                            + choice.stamina_delta * 0.02
+                            - f64::from(choice.budget_cost) * 0.12
+                    };
+                    score(left).total_cmp(&score(right))
+                })
+                .map(|(index, _)| index);
+            if let Some(index) = selected {
+                if let Ok(outcome) = game.apply_local_story_choice(index) {
+                    if show_progress {
+                        print_local_story_outcome(game, &outcome);
+                    }
+                }
+            } else {
+                let _ = game.skip_local_story_beat();
+                if show_progress {
+                    println!("本段地方故事因預算不足而略過，相關待辦仍保留在地方記憶中。\n");
                 }
             }
         }
@@ -4070,5 +4190,36 @@ mod tests {
         assert_eq!(left.staffer_progress.completed_briefings(), 6);
         assert_eq!(left.round, CAMPAIGN_ROUNDS);
         assert!(left.validate().is_ok());
+    }
+
+    #[test]
+    fn regional_story_save_commands_replay_the_same_relationship_and_poll_state() {
+        let region = find_region("雲棲市").unwrap();
+        let mut original = GameState::new_local_with_style(
+            2026,
+            Side::Challenger,
+            991,
+            CampaignStyle::Balanced,
+            region,
+        );
+        let mut commands = Vec::new();
+        for _ in 0..2 * DAYS_PER_WEEK {
+            original.apply_action(ActionId::RestAndPrepare).unwrap();
+            commands.push(SaveCommand::Action(ActionId::RestAndPrepare.index()));
+        }
+        original.apply_local_story_choice(1).unwrap();
+        commands.push(SaveCommand::LocalStoryChoice(1));
+
+        let mut replayed = GameState::new_local_with_style(
+            2026,
+            Side::Challenger,
+            991,
+            CampaignStyle::Balanced,
+            region,
+        );
+        replay_campaign(&mut replayed, &commands).unwrap();
+        assert_eq!(replayed.polls, original.polls);
+        assert_eq!(replayed.local_story_progress, original.local_story_progress);
+        assert_eq!(replayed.budget, original.budget);
     }
 }

@@ -5,7 +5,7 @@ use crate::game_content::{
     RegionProfile, VOTER_SEGMENTS,
 };
 use crate::governance::GovernmentOpinion;
-use crate::local_story::LocalStoryProgress;
+use crate::local_story::{LocalStoryBeat, LocalStoryProgress};
 use crate::staffer::{
     brief_for_round as staffer_brief_for_round, continuity_bonus as staffer_continuity_bonus,
     StafferBrief, StafferDecision, StafferProgress,
@@ -1675,6 +1675,81 @@ impl GameState {
         if !self
             .story_progress
             .record(beat.index, StoryDecision::Skipped)
+        {
+            return Err(GameError::StoryChoiceUnavailable);
+        }
+        Ok(())
+    }
+
+    pub fn current_local_story_beat(&self) -> Option<LocalStoryBeat> {
+        if self.final_outcome.is_some() || self.round >= CAMPAIGN_ROUNDS || self.day != 0 {
+            return None;
+        }
+        self.local_story_progress.beat(self.round, self.region?)
+    }
+
+    /// Resolve a regional story choice without consuming one of the daily turns.
+    pub fn apply_local_story_choice(
+        &mut self,
+        choice_index: usize,
+    ) -> Result<StoryOutcome, GameError> {
+        let beat = self
+            .current_local_story_beat()
+            .ok_or(GameError::StoryChoiceUnavailable)?;
+        let choice = beat
+            .choices
+            .get(choice_index)
+            .ok_or(GameError::StoryChoiceUnavailable)?;
+        if self.budget < choice.budget_cost {
+            return Err(GameError::InsufficientBudget {
+                required: choice.budget_cost,
+                available: self.budget,
+            });
+        }
+        let support_before = self.polls[self.player_index];
+        let repaired_integrity =
+            choice.repairs_integrity && self.local_story_progress.has_unresolved_integrity_breach();
+        if !self
+            .local_story_progress
+            .record_decision(beat.index, Some(choice_index), Some(choice))
+        {
+            return Err(GameError::StoryChoiceUnavailable);
+        }
+        self.budget -= choice.budget_cost;
+        self.apply_segment_swing(self.player_index, choice.support_delta, &[]);
+        self.trust = (self.trust + choice.trust_delta).clamp(0.0, 100.0);
+        self.turnout_momentum =
+            (self.turnout_momentum + choice.mobilization_delta).clamp(0.0, 100.0);
+        self.stamina = (self.stamina + choice.stamina_delta).clamp(0.0, 100.0);
+        let support_after = self.polls[self.player_index];
+        let note = if repaired_integrity {
+            Some("公開資料補上來源與修正紀錄；資訊破口仍留在歷史中，但已完成補正。")
+        } else if choice.resolves_followup {
+            Some("居民追蹤事項已完成交接；仍未完成的公共服務不會因選舉結束而消失。")
+        } else {
+            None
+        };
+        Ok(StoryOutcome {
+            title: beat.title,
+            choice_label: choice.label,
+            support_before,
+            support_after,
+            support_delta: support_after - support_before,
+            trust_after: self.trust,
+            mobilization_after: self.turnout_momentum,
+            stamina_after: self.stamina,
+            budget_after: self.budget,
+            note,
+        })
+    }
+
+    pub fn skip_local_story_beat(&mut self) -> Result<(), GameError> {
+        let beat = self
+            .current_local_story_beat()
+            .ok_or(GameError::StoryChoiceUnavailable)?;
+        if !self
+            .local_story_progress
+            .record_decision(beat.index, None, None)
         {
             return Err(GameError::StoryChoiceUnavailable);
         }
@@ -3414,6 +3489,46 @@ mod tests {
             presidential.local_story_progress,
             LocalStoryProgress::default()
         );
+    }
+
+    #[test]
+    fn local_story_choices_are_scheduled_persistent_and_affect_campaign_resources() {
+        use crate::local_story::LocalStoryDecision;
+
+        let region = crate::game_content::find_region("雲棲市").unwrap();
+        let mut local = GameState::new_local_with_style(
+            2026,
+            Side::Challenger,
+            155,
+            CampaignStyle::Organizer,
+            region,
+        );
+        assert!(local.current_local_story_beat().is_none());
+        assert!(matches!(
+            local.apply_local_story_choice(0),
+            Err(GameError::StoryChoiceUnavailable)
+        ));
+        for _ in 0..2 * DAYS_PER_WEEK {
+            local.apply_action(ActionId::RestAndPrepare).unwrap();
+        }
+        let beat = local.current_local_story_beat().unwrap();
+        assert_eq!(beat.week, 3);
+        let support_before = local.polls[local.player_index];
+        let budget_before = local.budget;
+        let outcome = local.apply_local_story_choice(0).unwrap();
+        assert_eq!(outcome.choice_label, "現勘後逐項回覆");
+        assert!(local.polls[local.player_index] > support_before);
+        assert_eq!(local.budget, budget_before - 4);
+        assert_eq!(
+            local.local_story_progress.decision(0),
+            Some(LocalStoryDecision::Chosen(0))
+        );
+        assert!(local.current_local_story_beat().is_none());
+        assert!(local.validate().is_ok());
+
+        let mut presidential = GameState::new(2024, Side::Challenger, 155);
+        assert!(presidential.current_local_story_beat().is_none());
+        assert!(presidential.skip_local_story_beat().is_err());
     }
 
     #[test]
