@@ -100,7 +100,7 @@ jobs:
           if (-not $advice.Contains("預估揭露")) { throw "Interactive action list omitted exposure forecasts." }
           if (-not $advice.Contains("本場玩家身分") -or -not $advice.Contains("玩家操控：侯友宜 / 趙少康")) { throw "Opening screen omitted the assigned player candidate." }
           if (-not $advice.Contains("其他競爭者：") -or -not $advice.Contains("柯文哲 / 吳欣盈")) { throw "Opening screen omitted the opponent roster." }
-          if (-not $advice.Contains("政府施政滿意度情境值") -or -not $advice.Contains("最受關注議題")) { throw "Opening screen did not show the separate government and issue indicators." }
+          if (-not $advice.Contains("政府施政滿意度情境值") -or -not $advice.Contains("議題焦點")) { throw "Opening screen did not show the separate government and issue indicators." }
           if (-not $advice.Contains("候選人選舉支持度") -or -not $advice.Contains("若比較「侯友宜 / 趙少康")) { throw "Poll table did not label candidate polling or pairwise comparison clearly." }
           if ($advice.Contains("分眾支持度（原型權重")) { throw "Opening snapshot should keep voter-segment detail behind the poll lookup." }
           if (-not $advice.Contains("行動詳情｜") -or -not $advice.Contains("推薦理由：")) { throw "Interactive action details omitted explanations." }
