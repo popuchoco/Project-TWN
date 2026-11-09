@@ -517,11 +517,11 @@ impl RecallStoryProgress {
                 self.resident_followup_pending = true;
             }
             (RecallSide::Initiator, RecallActionId::DoorToDoor)
-            | (RecallSide::Opposition, RecallActionId::QuietDeescalation) => {
-                if self.resident_followup_pending {
-                    adjust_recall_trust(&mut self.resident_trust, 1);
-                    self.resident_followup_pending = false;
-                }
+            | (RecallSide::Opposition, RecallActionId::QuietDeescalation)
+                if self.resident_followup_pending =>
+            {
+                adjust_recall_trust(&mut self.resident_trust, 1);
+                self.resident_followup_pending = false;
             }
             _ => {}
         }
