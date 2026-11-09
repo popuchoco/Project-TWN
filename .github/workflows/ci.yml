@@ -115,7 +115,7 @@ jobs:
           if (-not $interaction.Contains("行動方式：")) { throw "Interactive help did not explain the controls." }
           if ([regex]::Matches($interaction, "候選人選舉支持度").Count -lt 2) { throw "Poll lookup should be available during action selection." }
           if (-not $interaction.Contains("【即時局勢】候選人支持度（對比式）") -or -not $interaction.Contains("政黨票支持度（不分區情境）")) { throw "Daily status should label candidate and party support separately." }
-          if ([regex]::Matches($interaction, "【已選】").Count -ne 2) { throw "Executed actions should be marked in the text-only interface." }
+          if ([regex]::Matches($interaction, "✓ 第 .*【已選】").Count -ne 2) { throw "Executed actions should be marked in the text-only interface." }
           if (-not $interaction.Contains("政府施政滿意度｜整體") -or -not $interaction.Contains("議題處理優先序")) { throw "Poll lookup omitted the separate government opinion indicators." }
           if (-not $interaction.Contains("分眾支持度（原型權重")) { throw "Poll lookup omitted the detailed voter-segment panel." }
           if ([regex]::Matches($interaction, "✓ 第 ").Count -ne 2) { throw "Declining the exit prompt should return to the campaign." }
