@@ -911,7 +911,7 @@ fn print_action_details(recommendation: &StrategyRecommendation) {
         println!("推薦理由：{}。", recommendation.rationales.join("；"));
     }
     println!(
-        "策略排序分 {:.2}；支持度變化仍會受每日波動與對手回應影響。",
+        "策略分（排序用）{:.2}；支持度變化仍會受每日波動與對手回應影響。",
         recommendation.score
     );
 }
