@@ -822,6 +822,35 @@ fn run_recall_interactive(game: &mut RecallState) -> Result<bool, String> {
         match game.apply_action(action.id) {
             Ok(outcome) => {
                 println!("\n✓ {}｜{}", outcome.label, outcome.note);
+                let report = outcome.report;
+                match outcome.phase_before {
+                    RecallPhase::Proposal => println!(
+                        "本區塊變化（含對手回應）：提議人數 {} → {} / {}。",
+                        report.proposal_before,
+                        report.proposal_after,
+                        game.proposal_threshold
+                    ),
+                    RecallPhase::Signature => println!(
+                        "本區塊變化（含對手回應）：有效連署估計 {} → {} / {}；表面名冊仍以查對結果為準。",
+                        report.valid_signatures_before,
+                        report.valid_signatures_after,
+                        game.signature_threshold
+                    ),
+                    RecallPhase::VoteCampaign => println!(
+                        "本區塊變化（含對手回應）：罷免意向 {:+.2}、反罷免意向 {:+.2}；預估同意票 {} → {}、不同意票 {} → {}。",
+                        report.yes_intention_after - report.yes_intention_before,
+                        report.no_intention_after - report.no_intention_before,
+                        report.yes_votes_before,
+                        report.yes_votes_after,
+                        report.no_votes_before,
+                        report.no_votes_after
+                    ),
+                    RecallPhase::Complete => {}
+                }
+                println!(
+                    "目標公共服務紀錄：{:.1} → {:.1}/100。",
+                    report.target_record_before, report.target_record_after
+                );
                 println!(
                     "日程已推進至第 {} 日；預算餘額 {}。",
                     outcome.days_elapsed, outcome.budget_after
@@ -1033,6 +1062,7 @@ fn print_poll_table(game: &GameState) {
     }
     let opinion = &game.government_opinion;
     let salient_issue = opinion.most_salient_issue();
+    let issue_pressures = opinion.ranked_issue_signals();
     println!(
         "政府施政滿意度｜整體 {:.1}/100；最受關注議題：{}（議題評價 {:.1}/100、關注度 {:.1}/100；遊戲模型值）",
         opinion.administration_approval,
@@ -1040,6 +1070,21 @@ fn print_poll_table(game: &GameState) {
         opinion.issue_rating(salient_issue),
         opinion.issue_priority(salient_issue)
     );
+    println!("議題處理優先序（關注度 × 評價落差；僅為策略提示）：");
+    for signal in issue_pressures.iter().take(3) {
+        println!(
+            "  {}｜評價 {:.1}、關注 {:.1}、待改善壓力 {:.1}",
+            issue_label(signal.issue),
+            signal.rating,
+            signal.attention,
+            signal.pressure
+        );
+    }
+    let role_hint = match game.side {
+        Side::Incumbent => "執政方可檢視高壓議題的施政缺口；政策回應不會直接等同候選人支持度變化。",
+        Side::Challenger => "在野方可評估高壓議題的監督與替代方案；議題評價不會直接等同候選人支持度變化。",
+    };
+    println!("{role_hint}");
     println!("政府評價、候選人選舉支持度與團隊信任分開計算；此面板不是民調。\n");
     if game.candidates.len() > 2 {
         println!("互比式簡化情境：把其他候選人的支持平均分配給比較雙方；這不是實際互比民調。");
@@ -1080,12 +1125,14 @@ fn print_poll_summary(game: &GameState) {
     }
     let opinion = &game.government_opinion;
     let salient_issue = opinion.most_salient_issue();
+    let pressure_issue = opinion.highest_pressure_issue();
     println!(
-        "政府施政滿意度情境值：{:.1}/100；議題焦點：{}（評價 {:.1}/100、關注度 {:.1}/100）。此數值不等於候選人支持度。",
+        "政府施政滿意度情境值：{:.1}/100；最受關注：{}（評價 {:.1}/100）；優先檢視：{}（待改善壓力 {:.1}/100）。此數值不等於候選人支持度。",
         opinion.administration_approval,
         issue_label(salient_issue),
         opinion.issue_rating(salient_issue),
-        opinion.issue_priority(salient_issue)
+        issue_label(pressure_issue.issue),
+        pressure_issue.pressure
     );
     if game.candidates.len() > 2 {
         println!("互比式情境為遊戲簡化試算；完整分眾與各組互比請在行動選單輸入 p。每位候選人比例合計 100%。");
@@ -1447,6 +1494,11 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
     if let Some(echo) = route_echo {
         println!("劇情回聲：{echo}");
     }
+    if !staffer_mode && game.day == 0 {
+        if let Some(echo) = project_twn::story::character_memory_echo(week, game.story_progress) {
+            println!("人物記憶回訪：{echo}");
+        }
+    }
     if staffer_mode && game.day == 0 {
         let reminder = match game.side {
             Side::Incumbent => "執政方幕僚備忘：清楚區分已完成、進行中與超出權責的承諾。",
@@ -1455,11 +1507,14 @@ fn print_campaign_daily_scene(game: &GameState, staffer_mode: bool) {
         println!("{reminder}");
         let opinion = &game.government_opinion;
         let issue = opinion.most_salient_issue();
+        let priority = opinion.highest_pressure_issue();
         println!(
-            "幕僚民意簡報：政府施政滿意度 {:.1}/100；目前最受關注「{}」，議題評價 {:.1}/100。候選人支持度、政府評價與團隊信任分開；這是遊戲情境值，不是民調。",
+            "幕僚議題簡報：施政滿意度 {:.1}/100；最受關注「{}」，評價 {:.1}/100；優先檢視「{}」，待改善壓力 {:.1}/100。候選人支持度、政府評價與團隊信任分開；這是遊戲情境值，不是民調。",
             opinion.administration_approval,
             issue_label(issue),
-            opinion.issue_rating(issue)
+            opinion.issue_rating(issue),
+            issue_label(priority.issue),
+            priority.pressure
         );
     }
     if staffer_mode && (day == 1 || day == 7) {
@@ -1510,6 +1565,7 @@ fn print_candidate_story_summary(game: &GameState) {
         game.story_progress.completed_beats(),
         game.story_progress.summary()
     );
+    println!("{}", game.story_progress.memory_summary());
     println!("{}", candidate_story_ending_note(game.story_progress));
 }
 
@@ -1528,6 +1584,7 @@ fn print_story_outcome(game: &GameState, outcome: &StoryOutcome) {
         outcome.stamina_after,
         outcome.budget_after
     );
+    println!("人物記憶更新：{}", game.story_progress.memory_summary());
     if let Some(note) = outcome.note {
         println!("  {note}");
     }

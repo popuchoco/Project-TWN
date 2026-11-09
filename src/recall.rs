@@ -423,9 +423,29 @@ pub struct RecallActionOutcome {
     pub id: RecallActionId,
     pub label: &'static str,
     pub note: String,
+    pub phase_before: RecallPhase,
     pub phase_after: RecallPhase,
     pub days_elapsed: u16,
     pub budget_after: u8,
+    pub report: RecallTurnReport,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecallTurnReport {
+    pub proposal_before: u64,
+    pub proposal_after: u64,
+    pub valid_signatures_before: u64,
+    pub valid_signatures_after: u64,
+    pub yes_intention_before: f64,
+    pub yes_intention_after: f64,
+    pub no_intention_before: f64,
+    pub no_intention_after: f64,
+    pub yes_votes_before: u64,
+    pub yes_votes_after: u64,
+    pub no_votes_before: u64,
+    pub no_votes_after: u64,
+    pub target_record_before: f64,
+    pub target_record_after: f64,
 }
 
 impl RecallState {
@@ -659,6 +679,24 @@ impl RecallState {
                 available: self.budget,
             });
         }
+        let phase_before = self.phase;
+        let (yes_votes_before, no_votes_before) = self.estimated_vote_totals();
+        let report_before = RecallTurnReport {
+            proposal_before: self.proposal_count,
+            proposal_after: self.proposal_count,
+            valid_signatures_before: self.valid_signatures(),
+            valid_signatures_after: self.valid_signatures(),
+            yes_intention_before: self.yes_intention_pct,
+            yes_intention_after: self.yes_intention_pct,
+            no_intention_before: self.no_intention_pct,
+            no_intention_after: self.no_intention_pct,
+            yes_votes_before,
+            yes_votes_after: yes_votes_before,
+            no_votes_before,
+            no_votes_after: no_votes_before,
+            target_record_before: self.target_record,
+            target_record_after: self.target_record,
+        };
         self.budget -= spec.cost;
         let note = self.apply_effect(self.player_side, id);
         let opponent_action = self.ai_action(self.player_side.opponent());
@@ -669,14 +707,27 @@ impl RecallState {
         self.budget = self.budget.saturating_add(3).min(100);
         let final_note = format!("{note}；對手回應：{ai_note}");
         self.advance_phase_if_needed();
+        let (yes_votes_after, no_votes_after) = self.estimated_vote_totals();
+        let report = RecallTurnReport {
+            proposal_after: self.proposal_count,
+            valid_signatures_after: self.valid_signatures(),
+            yes_intention_after: self.yes_intention_pct,
+            no_intention_after: self.no_intention_pct,
+            yes_votes_after,
+            no_votes_after,
+            target_record_after: self.target_record,
+            ..report_before
+        };
         Ok(RecallActionOutcome {
             actor: self.player_side,
             id,
             label: spec.label,
             note: final_note,
+            phase_before,
             phase_after: self.phase,
             days_elapsed: self.days_elapsed,
             budget_after: self.budget,
+            report,
         })
     }
 
@@ -1103,6 +1154,22 @@ mod tests {
             .unwrap();
         assert!(opposition.target_record > baseline);
         assert!(opposition.validate().is_ok());
+    }
+
+    #[test]
+    fn recall_action_report_exposes_combined_player_and_opponent_response() {
+        let mut state = RecallState::new(RecallTemplate::Synthetic, RecallSide::Initiator, 103);
+        let outcome = state
+            .apply_action(RecallActionId::EvidenceBriefing)
+            .unwrap();
+
+        assert_eq!(outcome.phase_before, RecallPhase::Proposal);
+        assert!(outcome.report.proposal_after > outcome.report.proposal_before);
+        assert!(outcome.report.yes_intention_after > outcome.report.yes_intention_before);
+        assert!(outcome.report.no_intention_after > outcome.report.no_intention_before);
+        assert!(outcome.report.target_record_after < outcome.report.target_record_before);
+        assert_eq!(outcome.report.valid_signatures_before, 0);
+        assert_eq!(outcome.report.valid_signatures_after, 0);
     }
 
     #[test]

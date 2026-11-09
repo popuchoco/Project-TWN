@@ -6,6 +6,15 @@ use crate::game_content::Issue;
 pub const ISSUE_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IssueSignal {
+    pub issue: Issue,
+    pub rating: f64,
+    pub attention: f64,
+    /// Attention-weighted room for improvement, from 0 to 100.
+    pub pressure: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GovernmentOpinion {
     pub administration_approval: f64,
     pub issue_approval: [f64; ISSUE_COUNT],
@@ -60,6 +69,37 @@ impl GovernmentOpinion {
             }
         }
         issue_from_index(index)
+    }
+
+    /// Rank issue situations by attention multiplied by the rating gap.
+    /// This is an in-game prioritization aid, not a claim about public opinion.
+    pub fn issue_signals(&self) -> [IssueSignal; ISSUE_COUNT] {
+        std::array::from_fn(|index| {
+            let rating = self.issue_approval[index];
+            let attention = self.issue_salience[index];
+            IssueSignal {
+                issue: issue_from_index(index),
+                rating,
+                attention,
+                pressure: attention * (100.0 - rating) / 100.0,
+            }
+        })
+    }
+
+    pub fn ranked_issue_signals(&self) -> Vec<IssueSignal> {
+        let mut signals = self.issue_signals().to_vec();
+        signals.sort_by(|left, right| {
+            right
+                .pressure
+                .total_cmp(&left.pressure)
+                .then_with(|| right.attention.total_cmp(&left.attention))
+                .then_with(|| issue_index(left.issue).cmp(&issue_index(right.issue)))
+        });
+        signals
+    }
+
+    pub fn highest_pressure_issue(&self) -> IssueSignal {
+        self.ranked_issue_signals()[0]
     }
 }
 
@@ -136,5 +176,18 @@ mod tests {
         let mut opinion = GovernmentOpinion::default();
         opinion.observe(Issue::Rights, 0.0, 0.0, 1.0);
         assert_eq!(opinion.most_salient_issue(), Issue::Rights);
+    }
+
+    #[test]
+    fn issue_pressure_combines_attention_and_low_issue_rating() {
+        let mut opinion = GovernmentOpinion::default();
+        opinion.observe(Issue::Economy, 0.0, -20.0, 40.0);
+        opinion.observe(Issue::Education, 0.0, -5.0, 20.0);
+        let signals = opinion.ranked_issue_signals();
+        assert_eq!(signals[0].issue, Issue::Economy);
+        assert_eq!(signals[0].pressure, 35.0);
+        assert_eq!(signals[1].issue, Issue::Education);
+        assert_eq!(signals[1].pressure, 16.5);
+        assert_eq!(opinion.highest_pressure_issue(), signals[0]);
     }
 }

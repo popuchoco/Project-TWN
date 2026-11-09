@@ -322,16 +322,34 @@ impl StrategyModule for ContextFitModule {
         StrategyAxis::Context
     }
 
-    fn score(&self, _game: &GameState, preview: &ActionPreview) -> f64 {
-        f64::from(preview.event_match) * 1.4 + f64::from(preview.local_match) * 1.0
+    fn score(&self, game: &GameState, preview: &ActionPreview) -> f64 {
+        let issue_focus = game.government_opinion.highest_pressure_issue();
+        let issue_match = campaign_actions_for(game.side)
+            .into_iter()
+            .find(|action| action.id == preview.id)
+            .is_some_and(|action| action.issues.contains(&issue_focus.issue));
+        let issue_fit = if issue_match {
+            0.25 + issue_focus.pressure / 100.0 * 0.6
+        } else {
+            0.0
+        };
+        f64::from(preview.event_match) * 1.4
+            + f64::from(preview.local_match) * 1.0
+            + issue_fit
     }
 
-    fn rationale(&self, _game: &GameState, preview: &ActionPreview) -> Option<&'static str> {
-        match (preview.event_match, preview.local_match) {
-            (true, true) => Some("同時回應本週事件與地方焦點"),
-            (true, false) => Some("回應本週事件焦點"),
-            (false, true) => Some("符合地方議題焦點"),
-            (false, false) => None,
+    fn rationale(&self, game: &GameState, preview: &ActionPreview) -> Option<&'static str> {
+        let issue_focus = game.government_opinion.highest_pressure_issue();
+        let issue_match = campaign_actions_for(game.side)
+            .into_iter()
+            .find(|action| action.id == preview.id)
+            .is_some_and(|action| action.issues.contains(&issue_focus.issue));
+        match (preview.event_match, preview.local_match, issue_match) {
+            (true, true, _) => Some("同時回應本週事件與地方焦點"),
+            (true, false, _) => Some("回應本週事件焦點"),
+            (false, true, _) => Some("符合地方議題焦點"),
+            (false, false, true) => Some("對應高關注且評價待改善的議題"),
+            (false, false, false) => None,
         }
     }
 }
@@ -620,5 +638,42 @@ mod tests {
 
         assert!((focused.score - base.score - 0.28).abs() < 0.000_001);
         assert!(focused.rationales.contains(&"符合民生與生活成本主軸"));
+    }
+
+    #[test]
+    fn context_module_prioritizes_actions_for_high_pressure_governance_issues() {
+        let mut game = GameState::new_with_style(2024, Side::Challenger, 4, CampaignStyle::Balanced);
+        game.government_opinion.issue_approval[crate::governance::issue_index(
+            crate::game_content::Issue::Economy,
+        )] = 20.0;
+        game.government_opinion.issue_salience[crate::governance::issue_index(
+            crate::game_content::Issue::Economy,
+        )] = 100.0;
+        game.government_opinion.issue_salience[crate::governance::issue_index(
+            crate::game_content::Issue::Trust,
+        )] = 0.0;
+
+        let actions = campaign_actions_for(game.side);
+        let matching = actions
+            .iter()
+            .find(|action| action.issues.contains(&crate::game_content::Issue::Economy))
+            .unwrap();
+        let unrelated = actions
+            .iter()
+            .find(|action| !action.issues.contains(&crate::game_content::Issue::Economy))
+            .unwrap();
+        let mut matching_preview = game.preview_action(matching.id).unwrap();
+        let mut unrelated_preview = game.preview_action(unrelated.id).unwrap();
+        matching_preview.event_match = false;
+        matching_preview.local_match = false;
+        unrelated_preview.event_match = false;
+        unrelated_preview.local_match = false;
+        let module = ContextFitModule;
+
+        assert!(module.score(&game, &matching_preview) > module.score(&game, &unrelated_preview));
+        assert_eq!(
+            module.rationale(&game, &matching_preview),
+            Some("對應高關注且評價待改善的議題")
+        );
     }
 }

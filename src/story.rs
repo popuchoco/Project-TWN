@@ -57,9 +57,61 @@ pub enum StoryDecision {
     Skipped,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoryThreadStage {
+    NotStarted,
+    Open,
+    FollowedUp,
+    Resolved,
+    Deferred,
+}
+
+impl StoryThreadStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotStarted => "尚未展開",
+            Self::Open => "待回應",
+            Self::FollowedUp => "追蹤中",
+            Self::Resolved => "已收束",
+            Self::Deferred => "暫緩／仍待交代",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoryMemory {
+    pub resident_trust: u8,
+    pub team_trust: u8,
+    pub reporter_trust: u8,
+    pub rain_thread: StoryThreadStage,
+    pub information_thread: StoryThreadStage,
+}
+
+impl Default for StoryMemory {
+    fn default() -> Self {
+        Self {
+            resident_trust: 50,
+            team_trust: 50,
+            reporter_trust: 50,
+            rain_thread: StoryThreadStage::NotStarted,
+            information_thread: StoryThreadStage::NotStarted,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoryProgress {
     decisions: [Option<StoryDecision>; 6],
+    memory: StoryMemory,
+}
+
+impl Default for StoryProgress {
+    fn default() -> Self {
+        Self {
+            decisions: [None; 6],
+            memory: StoryMemory::default(),
+        }
+    }
 }
 
 impl StoryProgress {
@@ -86,6 +138,21 @@ impl StoryProgress {
             .count() as u8
     }
 
+    pub fn memory(self) -> StoryMemory {
+        self.memory
+    }
+
+    pub fn memory_summary(self) -> String {
+        format!(
+            "角色關係：陳秀惠（里民）{}/100、林予安（幕僚）{}/100、周以晴（記者）{}/100；雨後陳情線：{}；公開影像線：{}",
+            self.memory.resident_trust,
+            self.memory.team_trust,
+            self.memory.reporter_trust,
+            self.memory.rain_thread.label(),
+            self.memory.information_thread.label()
+        )
+    }
+
     pub(crate) fn record(&mut self, beat_index: usize, decision: StoryDecision) -> bool {
         let Some(slot) = self.decisions.get_mut(beat_index) else {
             return false;
@@ -94,6 +161,7 @@ impl StoryProgress {
             return false;
         }
         *slot = Some(decision);
+        self.memory.remember(beat_index, decision);
         true
     }
 
@@ -116,6 +184,105 @@ impl StoryProgress {
             }
         }
         true
+    }
+}
+
+impl StoryMemory {
+    fn remember(&mut self, beat_index: usize, decision: StoryDecision) {
+        match beat_index {
+            0 => {
+                self.rain_thread = opening_thread(decision);
+                self.resident_trust = adjust_relation(self.resident_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::FieldVisit) => 6,
+                    StoryDecision::Chosen(StoryChoiceId::PublishFacts) => 4,
+                    StoryDecision::Chosen(StoryChoiceId::CoordinateNetwork) => 2,
+                    _ => -3,
+                });
+            }
+            1 => {
+                self.information_thread = opening_thread(decision);
+                self.team_trust = adjust_relation(self.team_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::PublishFullClip) => 5,
+                    StoryDecision::Chosen(StoryChoiceId::CandidateInterview) => 3,
+                    StoryDecision::Chosen(StoryChoiceId::IgnoreClip) => -5,
+                    _ => -3,
+                });
+            }
+            2 => {
+                self.rain_thread = followup_thread(self.rain_thread, decision);
+                self.resident_trust = adjust_relation(self.resident_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::TrackProgress) => 3,
+                    StoryDecision::Chosen(StoryChoiceId::PublicRoundtable) => 4,
+                    StoryDecision::Chosen(StoryChoiceId::JointOversight) => 2,
+                    _ => -2,
+                });
+                self.reporter_trust = adjust_relation(self.reporter_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::TrackProgress) => 5,
+                    StoryDecision::Chosen(StoryChoiceId::PublicRoundtable) => 4,
+                    StoryDecision::Chosen(StoryChoiceId::JointOversight) => 3,
+                    _ => -3,
+                });
+            }
+            3 => {
+                self.information_thread = followup_thread(self.information_thread, decision);
+                self.reporter_trust = adjust_relation(self.reporter_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::PublishTimeline) => 6,
+                    StoryDecision::Chosen(StoryChoiceId::OpenQuestions) => 5,
+                    StoryDecision::Chosen(StoryChoiceId::SpokespersonBriefing) => 2,
+                    _ => -3,
+                });
+            }
+            4 => {
+                self.rain_thread = closing_thread(self.rain_thread, decision);
+                self.resident_trust = adjust_relation(self.resident_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::VerifiedDeadline) => 4,
+                    StoryDecision::Chosen(StoryChoiceId::ResidentReinspection) => 6,
+                    StoryDecision::Chosen(StoryChoiceId::PublishOpenItems) => 5,
+                    _ => -3,
+                });
+            }
+            5 => {
+                self.information_thread = closing_thread(self.information_thread, decision);
+                self.reporter_trust = adjust_relation(self.reporter_trust, match decision {
+                    StoryDecision::Chosen(StoryChoiceId::DebateWithRecord) => 5,
+                    StoryDecision::Chosen(StoryChoiceId::InterviewAfterDebate) => 4,
+                    StoryDecision::Chosen(StoryChoiceId::PivotToTurnout) => 2,
+                    _ => -3,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn adjust_relation(value: u8, delta: i16) -> u8 {
+    (i16::from(value) + delta).clamp(0, 100) as u8
+}
+
+fn opening_thread(decision: StoryDecision) -> StoryThreadStage {
+    match decision {
+        StoryDecision::Chosen(_) => StoryThreadStage::Open,
+        StoryDecision::Skipped => StoryThreadStage::Deferred,
+    }
+}
+
+fn followup_thread(current: StoryThreadStage, decision: StoryDecision) -> StoryThreadStage {
+    match decision {
+        StoryDecision::Chosen(_) => StoryThreadStage::FollowedUp,
+        StoryDecision::Skipped if current == StoryThreadStage::Open => StoryThreadStage::Deferred,
+        StoryDecision::Skipped => current,
+    }
+}
+
+fn closing_thread(current: StoryThreadStage, decision: StoryDecision) -> StoryThreadStage {
+    match decision {
+        StoryDecision::Chosen(_) => StoryThreadStage::Resolved,
+        StoryDecision::Skipped
+            if matches!(current, StoryThreadStage::Open | StoryThreadStage::FollowedUp) =>
+        {
+            StoryThreadStage::Deferred
+        }
+        StoryDecision::Skipped => current,
     }
 }
 
@@ -468,6 +635,63 @@ pub fn beat_for_round(round: u8, progress: StoryProgress) -> Option<StoryBeat> {
     })
 }
 
+/// A delayed callback triggered when a returning character brings up the team's
+/// earlier promise or information-handling decision.
+pub fn character_memory_echo(week: u8, progress: StoryProgress) -> Option<&'static str> {
+    let memory = progress.memory();
+    match week {
+        6 => match (memory.rain_thread, memory.resident_trust) {
+            (StoryThreadStage::Open, trust) if trust >= 55 => {
+                Some("陳秀惠記得團隊答應現勘，帶來新的通報，也願意先一起核對處理進度。")
+            }
+            (StoryThreadStage::Open, _) => {
+                Some("陳秀惠記得團隊承諾的後續；她先問上次列出的問題，是否已有能核對的答覆。")
+            }
+            (StoryThreadStage::Deferred, _) => {
+                Some("陳秀惠記得上次團隊沒有承諾處理方式，這次先要求說清楚誰會接手。")
+            }
+            _ => None,
+        },
+        10 => match (memory.rain_thread, memory.resident_trust) {
+            (StoryThreadStage::FollowedUp, trust) if trust >= 60 => {
+                Some("陳秀惠帶著居民共同整理的追蹤表回來，要求把最後期限和責任窗口寫清楚。")
+            }
+            (StoryThreadStage::FollowedUp, _) => {
+                Some("陳秀惠確認過部分追蹤資料，但仍要團隊交代尚未完成的項目。")
+            }
+            (StoryThreadStage::Deferred, _) => {
+                Some("陳秀惠指出前兩次留下的問題尚未形成後續，她要求團隊先列出可做到的下一步。")
+            }
+            _ => None,
+        },
+        8 => match (memory.information_thread, memory.team_trust) {
+            (StoryThreadStage::Open, trust) if trust >= 55 => {
+                Some("周以晴沿用上次公開的資料脈絡追問，並提醒團隊補上尚未確認的來源。")
+            }
+            (StoryThreadStage::Open, _) => {
+                Some("周以晴逐項核對團隊先前的說法，先問原始資料何時能公開。")
+            }
+            (StoryThreadStage::Deferred, _) => {
+                Some("周以晴記得團隊暫未回應片段爭議，這次把前次未答的問題重新帶回現場。")
+            }
+            _ => None,
+        },
+        12 => match (memory.information_thread, memory.reporter_trust) {
+            (StoryThreadStage::FollowedUp, trust) if trust >= 60 => {
+                Some("周以晴沿著已公開的查證紀錄做最後核對；尚未確認的空白也被列入追問。")
+            }
+            (StoryThreadStage::FollowedUp, _) => {
+                Some("周以晴確認過團隊的補充資料，但仍要求候選人在最後一次公開回應中交代疑點。")
+            }
+            (StoryThreadStage::Deferred, _) => {
+                Some("周以晴提醒團隊，前次沒有收束的問題仍在；辯論會可能再次被問到。")
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// A short callback that carries the candidate's earlier story decisions into
 /// the next campaign act. The daily scene remains shared, but this line makes
 /// the candidate mode's route visibly responsive to prior choices.
@@ -642,8 +866,8 @@ pub fn coherence_bonus(
     choice: StoryChoiceId,
     progress: StoryProgress,
 ) -> StoryBonus {
-    if beat_index == 4 {
-        return match (progress.decision(0), progress.decision(2), choice) {
+    let route_bonus = if beat_index == 4 {
+        match (progress.decision(0), progress.decision(2), choice) {
             (
                 Some(StoryDecision::Chosen(StoryChoiceId::FieldVisit)),
                 Some(StoryDecision::Chosen(StoryChoiceId::PublicRoundtable)),
@@ -672,11 +896,9 @@ pub fn coherence_bonus(
                 note: Some("前後一致的地方協調與監督路線，獲得信任加成。"),
             },
             _ => StoryBonus::default(),
-        };
-    }
-
-    if beat_index == 5 {
-        return match (progress.decision(1), progress.decision(3), choice) {
+        }
+    } else if beat_index == 5 {
+        match (progress.decision(1), progress.decision(3), choice) {
             (
                 Some(StoryDecision::Chosen(StoryChoiceId::PublishFullClip)),
                 Some(StoryDecision::Chosen(StoryChoiceId::PublishTimeline)),
@@ -705,10 +927,28 @@ pub fn coherence_bonus(
                 note: Some("集中最後衝刺並完成團隊交接，獲得小幅節奏加成。"),
             },
             _ => StoryBonus::default(),
-        };
+        }
+    } else {
+        StoryBonus::default()
+    };
+    let memory_bonus = match beat_index {
+        4 if progress.memory.resident_trust >= 60 => StoryBonus {
+            support_delta: 0.04,
+            trust_delta: 0.25,
+            note: Some("居民代表記得團隊的持續回訪，角色信任帶來小幅收尾加成。"),
+        },
+        5 if progress.memory.reporter_trust >= 55 => StoryBonus {
+            support_delta: 0.04,
+            trust_delta: 0.25,
+            note: Some("記者沿用既有查證脈絡追問，穩定回應帶來小幅收尾加成。"),
+        },
+        _ => StoryBonus::default(),
+    };
+    StoryBonus {
+        support_delta: route_bonus.support_delta + memory_bonus.support_delta,
+        trust_delta: route_bonus.trust_delta + memory_bonus.trust_delta,
+        note: route_bonus.note.or(memory_bonus.note),
     }
-
-    StoryBonus::default()
 }
 
 #[cfg(test)]
@@ -758,11 +998,15 @@ mod tests {
         progress.record(2, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
 
         let coherent = coherence_bonus(4, StoryChoiceId::ResidentReinspection, progress);
-        assert_eq!(coherent.support_delta, 0.12);
-        assert_eq!(coherent.trust_delta, 0.5);
+        assert_eq!(coherent.support_delta, 0.16);
+        assert_eq!(coherent.trust_delta, 0.75);
         assert_eq!(
             coherence_bonus(4, StoryChoiceId::PublishOpenItems, progress),
-            StoryBonus::default()
+            StoryBonus {
+                support_delta: 0.04,
+                trust_delta: 0.25,
+                note: Some("居民代表記得團隊的持續回訪，角色信任帶來小幅收尾加成。"),
+            }
         );
         assert_eq!(
             coherence_bonus(0, StoryChoiceId::FieldVisit, progress),
@@ -772,8 +1016,8 @@ mod tests {
         progress.record(1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip));
         progress.record(3, StoryDecision::Chosen(StoryChoiceId::PublishTimeline));
         let clip_bonus = coherence_bonus(5, StoryChoiceId::DebateWithRecord, progress);
-        assert_eq!(clip_bonus.support_delta, 0.12);
-        assert_eq!(clip_bonus.trust_delta, 0.6);
+        assert_eq!(clip_bonus.support_delta, 0.16);
+        assert_eq!(clip_bonus.trust_delta, 0.85);
     }
 
     #[test]
@@ -807,5 +1051,45 @@ mod tests {
         assert!(ending.contains("共同復勘"));
         assert!(ending.contains("辯論臺"));
         assert!(daily_route_echo(12, 3, progress).is_none());
+    }
+
+    #[test]
+    fn returning_characters_remember_trust_and_unresolved_story_threads() {
+        let mut trusted = StoryProgress::default();
+        trusted.record(0, StoryDecision::Chosen(StoryChoiceId::FieldVisit));
+        assert_eq!(trusted.memory().rain_thread, StoryThreadStage::Open);
+        assert!(character_memory_echo(6, trusted)
+            .unwrap()
+            .contains("願意先一起核對"));
+        trusted.record(2, StoryDecision::Chosen(StoryChoiceId::PublicRoundtable));
+        assert_eq!(trusted.memory().rain_thread, StoryThreadStage::FollowedUp);
+        assert!(character_memory_echo(10, trusted)
+            .unwrap()
+            .contains("共同整理的追蹤表"));
+        trusted.record(4, StoryDecision::Chosen(StoryChoiceId::ResidentReinspection));
+        assert_eq!(trusted.memory().rain_thread, StoryThreadStage::Resolved);
+        assert!(trusted.memory_summary().contains("已收束"));
+
+        let mut deferred = StoryProgress::default();
+        deferred.record(0, StoryDecision::Skipped);
+        assert_eq!(deferred.memory().rain_thread, StoryThreadStage::Deferred);
+        assert!(character_memory_echo(6, deferred)
+            .unwrap()
+            .contains("沒有承諾處理方式"));
+        assert!(deferred.memory().resident_trust < trusted.memory().resident_trust);
+
+        let mut reporter_route = StoryProgress::default();
+        reporter_route.record(1, StoryDecision::Chosen(StoryChoiceId::PublishFullClip));
+        assert!(character_memory_echo(8, reporter_route)
+            .unwrap()
+            .contains("沿用上次公開"));
+        reporter_route.record(3, StoryDecision::Chosen(StoryChoiceId::PublishTimeline));
+        assert_eq!(
+            reporter_route.memory().information_thread,
+            StoryThreadStage::FollowedUp
+        );
+        assert!(character_memory_echo(12, reporter_route)
+            .unwrap()
+            .contains("最後一次公開回應"));
     }
 }
