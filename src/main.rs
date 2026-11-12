@@ -955,7 +955,7 @@ fn retry_save(path: &str, mut save: impl FnMut() -> Result<(), String>) -> bool 
                     path,
                     &format!("第 {attempt}/3 次儲存失敗：{error}；稍後自動重試。"),
                 );
-                thread::sleep(Duration::from_millis(100 * u64::from(attempt)));
+                thread::sleep(Duration::from_millis(100 * attempt as u64));
             }
             Err(error) => {
                 warn_save_failure(
