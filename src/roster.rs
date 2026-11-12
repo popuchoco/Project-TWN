@@ -1,5 +1,6 @@
 //! Editable, fictional candidate rosters for local play.
 
+use crate::file_ops::replace_file;
 use crate::game_content::find_party;
 use crate::sim::GameState;
 use std::collections::HashSet;
@@ -72,7 +73,11 @@ impl CandidateRoster {
         let contents = fs::read_to_string(path.as_ref())
             .map_err(|error| format!("無法讀取候選人名冊：{error}"))?;
         let mut lines = contents.lines();
-        if lines.next() != Some(HEADER) {
+        if lines
+            .next()
+            .map(|header| header.strip_prefix('\u{feff}').unwrap_or(header))
+            != Some(HEADER)
+        {
             return Err(
                 "候選人名冊版本不支援；檔案首行須為 PROJECT_TWN_ROSTER<TAB>1。".to_string(),
             );
@@ -134,7 +139,7 @@ impl CandidateRoster {
             for candidate in &self.candidates {
                 writeln!(
                     file,
-                    "{}\t{}\t{:.4}\t{}",
+                    "{}\t{}\t{}\t{}",
                     candidate.name,
                     candidate.party,
                     candidate.starting_support,
@@ -151,7 +156,7 @@ impl CandidateRoster {
             let _ = fs::remove_file(&temp);
             return Err(format!("無法寫入候選人名冊：{error}"));
         }
-        fs::rename(&temp, path).map_err(|error| {
+        replace_file(&temp, path).map_err(|error| {
             let _ = fs::remove_file(&temp);
             format!("無法以新版名冊取代目標檔案：{error}")
         })
@@ -236,5 +241,36 @@ mod tests {
         assert_eq!(game.candidates[game.player_index].party, "群島共治黨");
         assert!((game.polls.iter().sum::<f64>() - 100.0).abs() < 1e-9);
         assert!(game.validate().is_ok());
+    }
+
+    #[test]
+    fn roster_preserves_small_nonzero_support_values() {
+        let path = std::env::temp_dir().join(format!(
+            "project-twn-roster-small-{}.tsv",
+            std::process::id()
+        ));
+        let mut value = roster();
+        value.candidates[0].starting_support = 0.000_01;
+        value.candidates[1].starting_support = 99.999_99;
+
+        value.write(&path).unwrap();
+
+        assert_eq!(CandidateRoster::read(&path).unwrap(), value);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn roster_reader_accepts_utf8_bom() {
+        let path =
+            std::env::temp_dir().join(format!("project-twn-roster-bom-{}.tsv", std::process::id()));
+        let value = roster();
+        value.write(&path).unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        let mut with_bom = b"\xef\xbb\xbf".to_vec();
+        with_bom.extend(contents);
+        std::fs::write(&path, with_bom).unwrap();
+
+        assert_eq!(CandidateRoster::read(&path).unwrap(), value);
+        std::fs::remove_file(path).unwrap();
     }
 }

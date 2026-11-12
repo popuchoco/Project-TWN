@@ -2,6 +2,7 @@
 name = "project-twn"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "以 Rust 打造的虛構臺灣選戰策略遊戲，包含候選人、幕僚、地方選舉與罷免模式。"
 license = "GPL-3.0-only"
 
@@ -16,4 +17,5 @@ path = "src/main.rs"
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+debug = 1
+strip = false

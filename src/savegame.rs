@@ -1,6 +1,7 @@
 //! Versioned replay-journal persistence for deterministic campaign sessions.
 //! The journal stores player decisions and replays them from the original seed.
 
+use crate::file_ops::replace_file;
 use crate::roster::{CandidateRoster, RosterEntry};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -70,7 +71,10 @@ impl SaveGame {
         let contents =
             fs::read_to_string(path).map_err(|error| format!("無法讀取存檔：{error}"))?;
         let mut lines = contents.lines();
-        let version = match lines.next() {
+        let version = match lines
+            .next()
+            .map(|header| header.strip_prefix('\u{feff}').unwrap_or(header))
+        {
             Some(HEADER_V1) => 1,
             Some(HEADER) => 2,
             _ => return Err("存檔版本不支援；此版本可讀取 PROJECT_TWN_SAVE 1／2。".to_string()),
@@ -265,7 +269,7 @@ impl SaveGame {
             let _ = fs::remove_file(&temp);
             return Err(format!("無法寫入存檔：{error}"));
         }
-        fs::rename(&temp, path).map_err(|error| {
+        replace_file(&temp, path).map_err(|error| {
             let _ = fs::remove_file(&temp);
             format!("無法以新版存檔取代目標檔案：{error}")
         })
@@ -481,5 +485,38 @@ mod tests {
         std::fs::write(&path, "PROJECT_TWN_SAVE\t3\n").unwrap();
         assert!(SaveGame::read(&path).is_err());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_reader_accepts_utf8_bom() {
+        let path =
+            std::env::temp_dir().join(format!("project-twn-save-bom-{}.tsv", std::process::id()));
+        let value = sample();
+        value.write(&path).unwrap();
+        let contents = std::fs::read(&path).unwrap();
+        let mut with_bom = b"\xef\xbb\xbf".to_vec();
+        with_bom.extend(contents);
+        std::fs::write(&path, with_bom).unwrap();
+
+        assert_eq!(SaveGame::read(&path).unwrap(), value);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rewriting_existing_save_replaces_it() {
+        let path = std::env::temp_dir().join(format!(
+            "project-twn-save-replace-{}.tsv",
+            std::process::id()
+        ));
+        let mut first = sample();
+        first.commands.clear();
+        first.write(&path).unwrap();
+        let mut second = sample();
+        second.commands.push(SaveCommand::Action(7));
+
+        second.write(&path).unwrap();
+
+        assert_eq!(SaveGame::read(&path).unwrap(), second);
+        std::fs::remove_file(path).unwrap();
     }
 }

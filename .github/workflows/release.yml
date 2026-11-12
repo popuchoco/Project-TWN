@@ -48,6 +48,9 @@ jobs:
         run: |
           ./target/${{ matrix.target }}/release/project-twn${{ matrix.extension == 'exe' && '.exe' || '' }} --history > /dev/null
           ./target/${{ matrix.target }}/release/project-twn${{ matrix.extension == 'exe' && '.exe' || '' }} --help > /dev/null
+          version_output=$(./target/${{ matrix.target }}/release/project-twn${{ matrix.extension == 'exe' && '.exe' || '' }} --version)
+          printf '%s\n' "$version_output"
+          echo "$version_output" | grep -F "$GITHUB_REF_NAME"
 
       - name: Package Windows tester bundle
         if: runner.os == 'Windows'

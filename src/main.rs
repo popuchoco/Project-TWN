@@ -38,8 +38,11 @@ use project_twn::strategy::{
 use std::collections::HashMap;
 use std::env;
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CAMPAIGN_LOG_HEADER: &str = "year\tmode\tregion\trole\tstyle\tstrategy\tseed\twinner\tplayer_win_probability\tobjectives_completed\tpolicy\ttrust\tmobilization\tevent_response\tresource_management\tversatility\texposed_tactics\tsanctioned_funds\tdifficulty\tevent_pack\ttimeline\tstory_path\tstaffer_path";
@@ -52,6 +55,8 @@ const MAX_INTERACTION_SENSITIVITY_SEEDS: u32 = 100;
 struct Options {
     year: u16,
     role: Option<Side>,
+    show_help: bool,
+    show_version: bool,
     style: CampaignStyle,
     strategy: StrategyProfile,
     seed: u64,
@@ -107,6 +112,13 @@ enum StartMode {
     Candidate,
     Staffer,
     Recall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionSelection {
+    Execute(ActionId),
+    BackToDailyOverview,
+    Quit,
 }
 
 impl ActionMenuCategory {
@@ -184,24 +196,34 @@ impl ActionMenuCategory {
 
 fn main() {
     install_panic_logger();
-    if let Err(message) = run() {
-        eprintln!("錯誤：{message}\n");
-        print_usage();
-        std::process::exit(2);
+    let exit_code = match panic::catch_unwind(AssertUnwindSafe(run)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) if is_broken_pipe_message(&message) => 0,
+        Ok(Err(message)) => {
+            write_stderr_line(&format!("錯誤：{message}\n使用 --help 查看命令說明。"));
+            match record_diagnostic("error", &message, "command-line") {
+                Ok(path) => write_stderr_line(&format!("錯誤診斷紀錄：{}", path.display())),
+                Err(error) => write_stderr_line(&format!("無法寫入錯誤診斷紀錄：{error}")),
+            }
+            2
+        }
+        Err(payload) if is_broken_pipe_payload(payload.as_ref()) => 0,
+        Err(_) => 101,
+    };
+    pause_before_console_exit();
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 
 fn install_panic_logger() {
     let default_hook = std::panic::take_hook();
-    let preferred_path = crash_log_path();
     std::panic::set_hook(Box::new(move |panic| {
+        let payload = panic_payload_message(panic.payload());
+        if is_broken_pipe_panic(&payload) {
+            return;
+        }
         default_hook(panic);
-        let payload = panic
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|message| (*message).to_string())
-            .or_else(|| panic.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "非文字 panic payload".to_string());
         let location = panic
             .location()
             .map(|location| {
@@ -214,38 +236,98 @@ fn install_panic_logger() {
             })
             .unwrap_or_else(|| "未知位置".to_string());
         let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        match append_diagnostic_entry(
-            &preferred_path,
-            "panic",
-            timestamp,
-            &payload,
-            &location,
-            &backtrace,
-        ) {
-            Ok(()) => eprintln!("遊戲診斷紀錄已寫入：{}", preferred_path.display()),
-            Err(primary_error) => {
-                let fallback_path = env::temp_dir().join("project-twn-crash.log");
-                match append_diagnostic_entry(
-                    &fallback_path,
-                    "panic",
-                    timestamp,
-                    &payload,
-                    &location,
-                    &backtrace,
-                ) {
-                    Ok(()) => eprintln!("遊戲診斷紀錄已寫入：{}", fallback_path.display()),
-                    Err(fallback_error) => eprintln!(
-                        "無法寫入遊戲診斷紀錄（{}；備援路徑也失敗：{}）",
-                        primary_error, fallback_error
-                    ),
-                }
-            }
+        match record_diagnostic_with_backtrace("panic", &payload, &location, &backtrace) {
+            Ok(path) => write_stderr_line(&format!("遊戲診斷紀錄已寫入：{}", path.display())),
+            Err(error) => write_stderr_line(&format!("無法寫入遊戲診斷紀錄：{error}")),
         }
     }));
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "非文字 panic payload".to_string())
+}
+
+fn is_broken_pipe_message(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("broken pipe")
+        || normalized.contains("pipe has been ended")
+        || normalized.contains("failed printing to stdout") && normalized.contains("pipe")
+        || message.contains("管道已結束")
+}
+
+fn is_broken_pipe_panic(payload: &str) -> bool {
+    payload.contains("failed printing to stdout") && is_broken_pipe_message(payload)
+}
+
+fn is_broken_pipe_payload(payload: &(dyn std::any::Any + Send)) -> bool {
+    is_broken_pipe_panic(&panic_payload_message(payload))
+}
+
+fn write_stderr_line(message: &str) {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "{message}");
+    let _ = stderr.flush();
+}
+
+fn pause_before_console_exit() {
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        return;
+    }
+    let mut stdout = io::stdout().lock();
+    let _ = write!(stdout, "\n按 Enter 關閉視窗……");
+    let _ = stdout.flush();
+    let mut input = String::new();
+    let _ = io::stdin().read_line(&mut input);
+}
+
+fn record_diagnostic(kind: &str, message: &str, location: &str) -> io::Result<PathBuf> {
+    let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+    record_diagnostic_with_backtrace(kind, message, location, &backtrace)
+}
+
+fn record_diagnostic_with_backtrace(
+    kind: &str,
+    message: &str,
+    location: &str,
+    backtrace: &str,
+) -> io::Result<PathBuf> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let preferred_path = crash_log_path();
+    match append_diagnostic_entry(
+        &preferred_path,
+        kind,
+        timestamp,
+        message,
+        location,
+        backtrace,
+    ) {
+        Ok(()) => Ok(preferred_path),
+        Err(primary_error) => {
+            let fallback_path = env::temp_dir().join("project-twn-crash.log");
+            append_diagnostic_entry(
+                &fallback_path,
+                kind,
+                timestamp,
+                message,
+                location,
+                backtrace,
+            )
+            .map(|()| fallback_path)
+            .map_err(|fallback_error| {
+                io::Error::new(
+                    fallback_error.kind(),
+                    format!("{primary_error}；暫存目錄寫入也失敗：{fallback_error}"),
+                )
+            })
+        }
+    }
 }
 
 fn crash_log_path() -> PathBuf {
@@ -276,7 +358,8 @@ fn append_diagnostic_entry(
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "=== Project-TWN {kind} ===")?;
     writeln!(file, "timestamp_unix: {timestamp}")?;
-    writeln!(file, "version: {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(file, "version: {}", build_version())?;
+    writeln!(file, "commit: {}", build_commit())?;
     writeln!(file, "platform: {} {}", env::consts::OS, env::consts::ARCH)?;
     writeln!(file, "location: {location}")?;
     writeln!(file, "message: {message}")?;
@@ -285,8 +368,24 @@ fn append_diagnostic_entry(
     file.flush()
 }
 
+fn build_version() -> &'static str {
+    env!("PROJECT_TWN_BUILD_VERSION")
+}
+
+fn build_commit() -> &'static str {
+    env!("PROJECT_TWN_BUILD_COMMIT")
+}
+
 fn run() -> Result<(), String> {
     let mut options = parse_args()?;
+    if options.show_help {
+        print_usage();
+        return Ok(());
+    }
+    if options.show_version {
+        println!("Project-TWN {} ({})", build_version(), build_commit());
+        return Ok(());
+    }
     let load_path = options.load_path.clone();
     let loaded_save = match load_path.as_deref() {
         Some(path) => {
@@ -345,12 +444,18 @@ fn run() -> Result<(), String> {
         let side = match options.recall_side {
             Some(side) => side,
             None if options.auto => RecallSide::Initiator,
-            None => ask_recall_side()?,
+            None => match ask_recall_side()? {
+                Some(side) => side,
+                None => return Ok(()),
+            },
         };
         let template = if options.auto || options.recall_template_selected {
             options.recall_template
         } else {
-            ask_recall_template()?
+            let Some(template) = ask_recall_template()? else {
+                return Ok(());
+            };
+            template
         };
         let mut game = RecallState::new(template, side, options.seed);
         let mut journal = loaded_save
@@ -365,19 +470,34 @@ fn run() -> Result<(), String> {
             template: template.key().to_string(),
             seed: options.seed,
         };
+        let initial_command_count = journal.len();
+        let mut save_ready = false;
         if let Some(path) = options.save_path.as_deref() {
-            persist_recall(path, &save_config, &journal)?;
+            save_ready = if loaded_save.is_some() && load_path.as_deref() == Some(path) {
+                true
+            } else {
+                persist_recall_with_warning(path, &save_config, &journal)
+            };
         }
-        print_recall_intro(&game);
+        print_recall_intro(&game, options.seed);
         if options.auto {
             run_recall_auto(&mut game);
         } else if game.phase != RecallPhase::Complete {
-            run_recall_interactive(
+            let completed = run_recall_interactive(
                 &mut game,
                 &mut journal,
                 options.save_path.as_deref(),
                 &save_config,
             )?;
+            if !completed {
+                let saved = if save_ready && journal.len() == initial_command_count {
+                    true
+                } else {
+                    checkpoint_recall(options.save_path.as_deref(), &save_config, &journal)
+                };
+                print_leave_message("罷免戰役", options.save_path.as_deref(), saved);
+                return Ok(());
+            }
         }
         print_recall_result(&game);
         return Ok(());
@@ -416,10 +536,16 @@ fn run() -> Result<(), String> {
     let role = match options.role {
         Some(role) => role,
         None if options.auto || options.party.is_some() => Side::Challenger,
-        None => ask_role()?,
+        None => match ask_role()? {
+            Some(role) => role,
+            None => return Ok(()),
+        },
     };
     let style = if options.primary {
-        run_primary(options.seed, options.auto)?
+        let Some(style) = run_primary(options.seed, options.auto)? else {
+            return Ok(());
+        };
+        style
     } else {
         options.style
     };
@@ -444,11 +570,17 @@ fn run() -> Result<(), String> {
         .as_ref()
         .map(|save| save.commands.clone())
         .unwrap_or_default();
+    let initial_command_count = journal.len();
     if loaded_save.is_some() {
         replay_campaign(&mut game, &journal)?;
     }
+    let mut save_ready = false;
     if let Some(path) = options.save_path.as_deref() {
-        persist_campaign(path, &save_config, &journal)?;
+        save_ready = if loaded_save.is_some() && load_path.as_deref() == Some(path) {
+            true
+        } else {
+            persist_campaign_with_warning(path, &save_config, &journal)
+        };
     }
     print_intro(&game, options.seed, options.strategy, options.staffer_mode);
 
@@ -459,14 +591,19 @@ fn run() -> Result<(), String> {
             run_auto(&mut game, true, options.strategy);
         }
     } else if !game.is_settled() && !game.is_finished() {
-        run_interactive(
+        let completed = run_interactive(
             &mut game,
             options.strategy,
             options.staffer_mode,
             &mut journal,
             options.save_path.as_deref(),
             &save_config,
+            initial_command_count,
+            save_ready,
         )?;
+        if !completed {
+            return Ok(());
+        }
     }
     let result = print_final(&mut game);
     if options.staffer_mode {
@@ -771,24 +908,80 @@ fn checkpoint_campaign(
     path: Option<&str>,
     config: &CampaignSaveConfig,
     commands: &[SaveCommand],
-) -> Result<(), String> {
+) -> bool {
     if let Some(path) = path {
-        game.validate()
-            .map_err(|error| format!("存檔前狀態檢查失敗：{error}"))?;
-        persist_campaign(path, config, commands)?;
+        if let Err(error) = game.validate() {
+            warn_save_failure(path, &format!("存檔前狀態檢查失敗：{error}"));
+            return false;
+        }
+        return retry_save(path, || persist_campaign(path, config, commands));
     }
-    Ok(())
+    true
 }
 
 fn checkpoint_recall(
     path: Option<&str>,
     config: &RecallSaveConfig,
     commands: &[SaveCommand],
-) -> Result<(), String> {
+) -> bool {
     if let Some(path) = path {
-        persist_recall(path, config, commands)?;
+        return retry_save(path, || persist_recall(path, config, commands));
     }
-    Ok(())
+    true
+}
+
+fn persist_campaign_with_warning(
+    path: &str,
+    config: &CampaignSaveConfig,
+    commands: &[SaveCommand],
+) -> bool {
+    retry_save(path, || persist_campaign(path, config, commands))
+}
+
+fn persist_recall_with_warning(
+    path: &str,
+    config: &RecallSaveConfig,
+    commands: &[SaveCommand],
+) -> bool {
+    retry_save(path, || persist_recall(path, config, commands))
+}
+
+fn retry_save(path: &str, mut save: impl FnMut() -> Result<(), String>) -> bool {
+    for attempt in 1..=3 {
+        match save() {
+            Ok(()) => return true,
+            Err(error) if attempt < 3 => {
+                warn_save_failure(
+                    path,
+                    &format!("第 {attempt}/3 次儲存失敗：{error}；稍後自動重試。"),
+                );
+                thread::sleep(Duration::from_millis(100 * u64::from(attempt)));
+            }
+            Err(error) => {
+                warn_save_failure(
+                    path,
+                    &format!("重試 3 次仍失敗：{error}；遊戲會繼續，但本次進度尚未寫入。"),
+                );
+            }
+        }
+    }
+    false
+}
+
+fn warn_save_failure(path: &str, message: &str) {
+    write_stderr_line(&format!("存檔警告（{path}）：{message}"));
+}
+
+fn print_leave_message(mode: &str, save_path: Option<&str>, saved: bool) {
+    match (save_path, saved) {
+        (Some(path), true) => {
+            println!("\n已離開{mode}；進度已保存，可用 `--load \"{path}\"` 接續。")
+        }
+        (Some(_), false) => {
+            println!("\n已離開{mode}；存檔重試仍失敗，請檢查路徑／檔案占用後再試。")
+        }
+        (None, _) => println!("\n已離開{mode}。"),
+    }
 }
 
 fn resolve_scenario(
@@ -872,7 +1065,10 @@ fn run_roster_editor(path: &str) -> Result<(), String> {
             .join("、")
     );
     let count: usize = loop {
-        let value = prompt_line("候選人人數（2–5）：")?;
+        let Some(value) = prompt_line("候選人人數（2–5）：")? else {
+            println!("已離開名冊編輯器；名冊尚未寫入。\n");
+            return Ok(());
+        };
         if let Ok(value) = value.parse::<usize>() {
             if (2..=5).contains(&value) {
                 break value;
@@ -883,16 +1079,46 @@ fn run_roster_editor(path: &str) -> Result<(), String> {
     let mut candidates = Vec::with_capacity(count);
     for index in 0..count {
         println!("\n候選人 {}：", index + 1);
-        let name = prompt_line("  姓名：")?;
+        let name = loop {
+            let Some(value) = prompt_line("  姓名：")? else {
+                println!("已離開名冊編輯器；名冊尚未寫入。\n");
+                return Ok(());
+            };
+            let value = value.trim();
+            if value.chars().count() < 2
+                || value.chars().count() > 24
+                || value.chars().any(|character| {
+                    character.is_control() || matches!(character, '\t' | '\n' | '\r')
+                })
+            {
+                println!("  姓名需為 2 至 24 字，且不可含控制字元或欄位分隔符；請重填姓名。\n");
+                continue;
+            }
+            if candidates
+                .iter()
+                .any(|candidate: &RosterEntry| candidate.name.trim() == value)
+            {
+                println!("  姓名重複；請重填這位候選人的姓名。\n");
+                continue;
+            }
+            break value.to_string();
+        };
         let party = loop {
-            let value = prompt_line("  政黨名稱（須使用上述虛構政黨）：")?;
+            let Some(value) = prompt_line("  政黨名稱（須使用上述虛構政黨）：")?
+            else {
+                println!("已離開名冊編輯器；名冊尚未寫入。\n");
+                return Ok(());
+            };
             if find_party(&value).is_some() {
                 break value;
             }
             println!("  這個政黨不在虛構名冊中，請重新輸入。\n");
         };
         let starting_support: f64 = loop {
-            let value = prompt_line("  起始支持度（0–100）：")?;
+            let Some(value) = prompt_line("  起始支持度（0–100）：")? else {
+                println!("已離開名冊編輯器；名冊尚未寫入。\n");
+                return Ok(());
+            };
             if let Ok(value) = value.parse::<f64>() {
                 if value.is_finite() && (0.0..=100.0).contains(&value) {
                     break value;
@@ -901,10 +1127,14 @@ fn run_roster_editor(path: &str) -> Result<(), String> {
             println!("  請輸入 0 至 100 的數字。\n");
         };
         let player = loop {
-            match prompt_line("  本場玩家候選人？（y/n）：")?
-                .to_ascii_lowercase()
-                .as_str()
-            {
+            let Some(value) = prompt_line("  本場玩家候選人？（y/n）：")? else {
+                println!("已離開名冊編輯器；名冊尚未寫入。\n");
+                return Ok(());
+            };
+            match value.to_ascii_lowercase().as_str() {
+                "y" | "yes" | "是" if candidates.iter().any(|candidate| candidate.player) => {
+                    println!("  玩家席位已指派給前一位候選人；此位請選 n。\n");
+                }
                 "y" | "yes" | "是" => break true,
                 "n" | "no" | "否" => break false,
                 _ => println!("  請輸入 y 或 n。"),
@@ -917,6 +1147,51 @@ fn run_roster_editor(path: &str) -> Result<(), String> {
             player,
         });
     }
+    if !candidates.iter().any(|candidate| candidate.player) {
+        loop {
+            let Some(value) = prompt_line(&format!("玩家候選人編號（1–{count}）："))?
+            else {
+                println!("已離開名冊編輯器；名冊尚未寫入。\n");
+                return Ok(());
+            };
+            if let Ok(index) = value.parse::<usize>() {
+                if let Some(index) = index.checked_sub(1).filter(|index| *index < count) {
+                    candidates[index].player = true;
+                    break;
+                }
+            }
+            println!("請輸入有效的候選人編號。\n");
+        }
+    }
+    if candidates
+        .iter()
+        .map(|candidate| candidate.starting_support)
+        .sum::<f64>()
+        <= 0.0
+    {
+        let last_name = candidates
+            .last()
+            .map(|candidate| candidate.name.clone())
+            .unwrap_or_else(|| "最後一位".to_string());
+        loop {
+            let Some(value) = prompt_line(&format!(
+                "名冊起始支持度總和需大於 0；請重填 {last_name} 的支持度（0–100）："
+            ))?
+            else {
+                println!("已離開名冊編輯器；名冊尚未寫入。\n");
+                return Ok(());
+            };
+            if let Ok(value) = value.parse::<f64>() {
+                if value.is_finite() && (0.0..=100.0).contains(&value) && value > 0.0 {
+                    if let Some(last) = candidates.last_mut() {
+                        last.starting_support = value;
+                    }
+                    break;
+                }
+            }
+            println!("請輸入大於 0 且不超過 100 的數字。\n");
+        }
+    }
     let roster = CandidateRoster { candidates };
     roster.validate()?;
     roster.write(path)?;
@@ -924,14 +1199,18 @@ fn run_roster_editor(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn prompt_line(label: &str) -> Result<String, String> {
+fn prompt_line(label: &str) -> Result<Option<String>, String> {
     print!("{label}");
     io::stdout().flush().map_err(|error| error.to_string())?;
+    read_console_line()
+}
+
+fn read_console_line() -> Result<Option<String>, String> {
     let mut value = String::new();
-    io::stdin()
+    let bytes = io::stdin()
         .read_line(&mut value)
         .map_err(|error| error.to_string())?;
-    Ok(value.trim().to_string())
+    Ok((bytes > 0).then(|| value.trim().to_string()))
 }
 
 fn should_offer_start_mode(options: &Options, has_loaded_save: bool) -> bool {
@@ -952,18 +1231,13 @@ fn should_offer_start_mode(options: &Options, has_loaded_save: bool) -> bool {
 fn ask_start_mode() -> Result<Option<StartMode>, String> {
     loop {
         println!("\n=== 選擇遊戲模式 ===");
-        println!("  1) 候選人模式｜親自扮演候選人，安排每日選戰行動與劇情抉擇。\n  2) 幕僚模式｜替候選人規劃競選主軸、議題攻防及每日布局。\n  3) 人民罷免模式｜選擇發動罷免或反對罷免，進行提議、連署與投票宣傳。\n  0) 離開");
+        println!("  1) 候選人模式｜親自扮演候選人，安排每日選戰行動與劇情抉擇。\n  2) 幕僚模式｜替候選人規劃競選主軸、議題攻防及每日布局。\n  3) 人民罷免模式｜選擇發動罷免或反對罷免，進行提議、連署與投票宣傳。\n  0) 離開（q 同義）");
         print!("請輸入模式編號（0–3）：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        if io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?
-            == 0
-        {
+        let Some(input) = read_console_line()? else {
             return Ok(None);
-        }
-        match input.trim() {
+        };
+        match input.as_str() {
             "1" => return Ok(Some(StartMode::Candidate)),
             "2" => return Ok(Some(StartMode::Staffer)),
             "3" => return Ok(Some(StartMode::Recall)),
@@ -978,9 +1252,11 @@ fn parse_args() -> Result<Options, String> {
     let mut options = Options {
         year: 2026,
         role: None,
+        show_help: false,
+        show_version: false,
         style: CampaignStyle::Balanced,
         strategy: StrategyProfile::Balanced,
-        seed: 2026,
+        seed: runtime_seed(),
         auto: false,
         show_scenarios: false,
         list_regions: false,
@@ -1009,10 +1285,8 @@ fn parse_args() -> Result<Options, String> {
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => {
-                print_usage();
-                std::process::exit(0);
-            }
+            "--help" | "-h" => options.show_help = true,
+            "--version" | "-V" => options.show_version = true,
             "--history" | "--scenarios" => options.show_scenarios = true,
             "--regions" => options.list_regions = true,
             "--parties" => options.list_parties = true,
@@ -1246,6 +1520,14 @@ fn parse_args() -> Result<Options, String> {
     Ok(options)
 }
 
+fn runtime_seed() -> u64 {
+    let time_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    time_seed ^ u64::from(std::process::id()).rotate_left(32)
+}
+
 fn parse_role(value: &str) -> Result<Side, String> {
     match value.to_ascii_lowercase().as_str() {
         "incumbent" | "inc" | "執政" | "連任" => Ok(Side::Incumbent),
@@ -1266,19 +1548,19 @@ fn parse_style(value: &str) -> Result<CampaignStyle, String> {
     }
 }
 
-fn ask_role() -> Result<Side, String> {
+fn ask_role() -> Result<Option<Side>, String> {
     loop {
         println!("此處選的是執政／在野角色；玩家候選人會依年份與地區基準自動指派，開場會列出姓名或政黨情境代表。");
-        println!("選擇陣營：1) 執政／尋求連任  2) 在野挑戰");
-        print!("請輸入 1 或 2：");
+        println!("選擇陣營：1) 執政／尋求連任  2) 在野挑戰  0) 返回");
+        print!("請輸入 1、2 或 0：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        match input.trim() {
-            "1" => return Ok(Side::Incumbent),
-            "2" => return Ok(Side::Challenger),
+        let Some(input) = read_console_line()? else {
+            return Ok(None);
+        };
+        match input.as_str() {
+            "1" => return Ok(Some(Side::Incumbent)),
+            "2" => return Ok(Some(Side::Challenger)),
+            "0" | "q" | "Q" => return Ok(None),
             _ => println!("請輸入 1 或 2。"),
         }
     }
@@ -1294,25 +1576,25 @@ fn parse_recall_side(value: &str) -> Result<RecallSide, String> {
     }
 }
 
-fn ask_recall_side() -> Result<RecallSide, String> {
+fn ask_recall_side() -> Result<Option<RecallSide>, String> {
     loop {
         println!("玩家扮演人民發動罷免的提議／連署方，或反對罷免方；本模式不包含彈劾。");
-        println!("選擇陣營：1) 罷免提議／連署方  2) 反對罷免方");
-        print!("請輸入 1 或 2：");
+        println!("選擇陣營：1) 罷免提議／連署方  2) 反對罷免方  0) 返回");
+        print!("請輸入 1、2 或 0：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        match input.trim() {
-            "1" => return Ok(RecallSide::Initiator),
-            "2" => return Ok(RecallSide::Opposition),
+        let Some(input) = read_console_line()? else {
+            return Ok(None);
+        };
+        match input.as_str() {
+            "1" => return Ok(Some(RecallSide::Initiator)),
+            "2" => return Ok(Some(RecallSide::Opposition)),
+            "0" | "q" | "Q" => return Ok(None),
             _ => println!("請輸入 1 或 2。"),
         }
     }
 }
 
-fn ask_recall_template() -> Result<RecallTemplate, String> {
+fn ask_recall_template() -> Result<Option<RecallTemplate>, String> {
     loop {
         println!("\n選擇罷免目標與選區盤型（皆為虛構情境）：");
         for (index, template) in RecallTemplate::ALL.iter().copied().enumerate() {
@@ -1325,16 +1607,18 @@ fn ask_recall_template() -> Result<RecallTemplate, String> {
                 template.constituency_issue()
             );
         }
-        print!("請輸入 1–4：");
+        print!("請輸入 1–4（0 或 q 返回）：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        if let Ok(selection) = input.trim().parse::<usize>() {
+        let Some(input) = read_console_line()? else {
+            return Ok(None);
+        };
+        if matches!(input.as_str(), "0" | "q" | "Q") {
+            return Ok(None);
+        }
+        if let Ok(selection) = input.parse::<usize>() {
             if let Some(index) = selection.checked_sub(1) {
                 if let Some(template) = RecallTemplate::ALL.get(index) {
-                    return Ok(*template);
+                    return Ok(Some(*template));
                 }
             }
         }
@@ -1342,16 +1626,17 @@ fn ask_recall_template() -> Result<RecallTemplate, String> {
     }
 }
 
-fn print_recall_intro(game: &RecallState) {
+fn print_recall_intro(game: &RecallState, seed: u64) {
     println!("\n=== 人民罷免戰役｜Project-TWN ===");
     println!(
-        "虛構罷免目標：區域立法委員 {}（{}）　｜虛構選區：{}\n情境盤型：{}　玩家陣營：{}　選舉人：{}　隨機種子：固定可重現",
+        "虛構罷免目標：區域立法委員 {}（{}）　｜虛構選區：{}\n情境盤型：{}　玩家陣營：{}　選舉人：{}　隨機種子：{}",
         game.template.target_name(),
         game.template.target_party(),
         game.template.district_name(),
         game.template.label(),
         game.player_side.label(),
-        game.electorate
+        game.electorate,
+        seed
     );
     println!("{}", game.template.briefing());
     let eligibility = game.template.eligibility();
@@ -1495,13 +1780,12 @@ fn run_recall_interactive(
                 action.description
             );
         }
-        print!("選行動（p 盤勢，? 說明，q 離開）：");
+        print!("選行動（0 返回本階段盤勢，p 盤勢，? 說明，q 離開）：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        let value = input.trim();
+        let Some(value) = read_console_line()? else {
+            return Ok(false);
+        };
+        let value = value.as_str();
         if value.eq_ignore_ascii_case("p") {
             print_recall_status(game);
             continue;
@@ -1513,27 +1797,30 @@ fn run_recall_interactive(
         if value.eq_ignore_ascii_case("q") {
             print!("離開目前罷免戰役？輸入 y 確認，其餘輸入返回：");
             io::stdout().flush().map_err(|error| error.to_string())?;
-            let mut confirm = String::new();
-            io::stdin()
-                .read_line(&mut confirm)
-                .map_err(|error| error.to_string())?;
-            if confirm.trim().eq_ignore_ascii_case("y") {
+            let Some(confirm) = read_console_line()? else {
+                return Ok(false);
+            };
+            if confirm.eq_ignore_ascii_case("y") {
                 return Ok(false);
             }
             continue;
         }
         let Ok(selection) = value.parse::<usize>() else {
-            println!("請輸入行動編號、p、? 或 q。\n");
+            println!("請輸入行動編號、0、p、? 或 q。\n");
             continue;
         };
-        let Some(action) = choices.get(selection.saturating_sub(1)) else {
+        let Some(index) = selection.checked_sub(1) else {
+            println!("0 返回本階段盤勢；未執行行動。\n");
+            continue;
+        };
+        let Some(action) = choices.get(index) else {
             println!("沒有這個行動選項。\n");
             continue;
         };
         match game.apply_action(action.id) {
             Ok(outcome) => {
                 journal.push(SaveCommand::RecallAction(outcome.id.index()));
-                checkpoint_recall(save_path, save_config, journal)?;
+                checkpoint_recall(save_path, save_config, journal);
                 println!("\n✓ {}｜{}", outcome.label, outcome.note);
                 if outcome.relationship_bonus.abs() >= 0.005 {
                     println!(
@@ -2023,7 +2310,10 @@ fn run_interactive(
     journal: &mut Vec<SaveCommand>,
     save_path: Option<&str>,
     save_config: &CampaignSaveConfig,
-) -> Result<(), String> {
+    initial_command_count: usize,
+    save_ready: bool,
+) -> Result<bool, String> {
+    let mut quit_requested = false;
     'campaign: while !game.is_finished() {
         println!(
             "\n--- 第 {} / {} 週・第 {} / {} 天｜{} ---",
@@ -2073,6 +2363,7 @@ fn run_interactive(
             && game.current_staffer_brief().is_some()
             && !run_interactive_staffer_brief(game, journal, save_path, save_config)?
         {
+            quit_requested = true;
             break 'campaign;
         }
         if !staffer_mode {
@@ -2103,19 +2394,20 @@ fn run_interactive(
                         println!("     {}", choice.description);
                     }
                     let Some(selection) = select_story_choice(beat.choices.len())? else {
+                        quit_requested = true;
                         break 'campaign;
                     };
                     if selection == 0 {
                         game.skip_story_beat().map_err(|error| error.to_string())?;
                         journal.push(SaveCommand::SkipStory);
-                        checkpoint_campaign(game, save_path, save_config, journal)?;
+                        checkpoint_campaign(game, save_path, save_config, journal);
                         println!("本段情境暫不處理；後續故事仍會依目前進度展開。\n");
                         break;
                     }
                     match game.apply_story_choice(selection - 1) {
                         Ok(outcome) => {
                             journal.push(SaveCommand::StoryChoice(selection - 1));
-                            checkpoint_campaign(game, save_path, save_config, journal)?;
+                            checkpoint_campaign(game, save_path, save_config, journal);
                             print_story_outcome(game, &outcome);
                             break;
                         }
@@ -2151,20 +2443,21 @@ fn run_interactive(
                     println!("     {}", choice.description);
                 }
                 let Some(selection) = select_story_choice(beat.choices.len())? else {
+                    quit_requested = true;
                     break 'campaign;
                 };
                 if selection == 0 {
                     game.skip_local_story_beat()
                         .map_err(|error| error.to_string())?;
                     journal.push(SaveCommand::SkipLocalStory);
-                    checkpoint_campaign(game, save_path, save_config, journal)?;
+                    checkpoint_campaign(game, save_path, save_config, journal);
                     println!("地方情境先略過；相關人物關係與未完成承諾會保留在故事進度中。\n");
                     break;
                 }
                 match game.apply_local_story_choice(selection - 1) {
                     Ok(outcome) => {
                         journal.push(SaveCommand::LocalStoryChoice(selection - 1));
-                        checkpoint_campaign(game, save_path, save_config, journal)?;
+                        checkpoint_campaign(game, save_path, save_config, journal);
                         print_local_story_outcome(game, &outcome);
                         break;
                     }
@@ -2179,36 +2472,48 @@ fn run_interactive(
             }
         }
         let recommendations = strategy_engine_for(game, strategy, staffer_mode).rank_actions(game);
-        let selected = select_interactive_action(game, &recommendations)?;
-        let Some(action_id) = selected else {
-            break;
+        let action_id = match select_interactive_action(game, &recommendations)? {
+            ActionSelection::Execute(action_id) => action_id,
+            ActionSelection::BackToDailyOverview => continue 'campaign,
+            ActionSelection::Quit => {
+                quit_requested = true;
+                break 'campaign;
+            }
         };
         match game.apply_action(action_id) {
             Ok(outcome) => {
                 journal.push(SaveCommand::Action(action_id.index()));
-                checkpoint_campaign(game, save_path, save_config, journal)?;
+                checkpoint_campaign(game, save_path, save_config, journal);
                 print_action_outcome(game, &outcome, staffer_mode)
             }
             Err(message) => println!("{message}\n"),
         }
     }
+    if quit_requested && save_path.is_some() {
+        let saved = if save_ready && journal.len() == initial_command_count {
+            true
+        } else {
+            checkpoint_campaign(game, save_path, save_config, journal)
+        };
+        print_leave_message("競選戰役", save_path, saved);
+        return Ok(false);
+    }
     if !game.is_finished() && !game.is_settled() {
         journal.push(SaveCommand::SettleEarly);
         game.finish();
-        checkpoint_campaign(game, save_path, save_config, journal)?;
+        checkpoint_campaign(game, save_path, save_config, journal);
     }
-    Ok(())
+    Ok(true)
 }
 
 fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
     loop {
         print!("選擇方案（1–{choice_count}，0 略過，? 說明，q 結束本場）：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        let value = input.trim();
+        let Some(value) = read_console_line()? else {
+            return Ok(None);
+        };
+        let value = value.as_str();
         if value.eq_ignore_ascii_case("q") {
             if confirm_end_campaign()? {
                 return Ok(None);
@@ -2231,19 +2536,15 @@ fn select_story_choice(choice_count: usize) -> Result<Option<usize>, String> {
 fn confirm_end_campaign() -> Result<bool, String> {
     print!("結束本場並立即結算？輸入 y 確認，其餘輸入返回：");
     io::stdout().flush().map_err(|error| error.to_string())?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|error| error.to_string())?;
-    Ok(matches!(
-        input.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    let Some(input) = read_console_line()? else {
+        return Ok(true);
+    };
+    Ok(matches!(input.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 fn print_action_menu_help() {
     println!(
-        "\n行動方式：先選一個分類，再選行動；輸入 r 可執行策略引擎首選，p 可隨時查看支持度，? 可重看說明。分類內輸入 d 編號可先看行動描述與效果，數字則會直接執行；執行結果以 ✓【已選】標示，b 返回上一層。q 會先詢問是否提前結算。\n每日狀態分別列出候選人支持度與全國政黨票支持度；支持度預估是目前遊戲模型的一步期望，不是實際民調。每次每日行動都會推進一天，每週末附戰情回顧。\n"
+        "\n行動方式：先選一個分類，再選行動；輸入 r 可執行策略引擎首選，p 可隨時查看支持度，? 可重看說明。分類內輸入 d 編號可先看行動描述與效果，數字則會直接執行；執行結果以 ✓【已選】標示，0 或 b 返回上一層。分類選單的 0 返回當日總覽，不會執行第一個選項。q 會先詢問是否提前結算；若使用 --save，離開會保留可續玩的進度。\n每日狀態分別列出候選人支持度與全國政黨票支持度；支持度預估是目前遊戲模型的一步期望，不是實際民調。每次每日行動都會推進一天，每週末附戰情回顧。\n"
     );
 }
 
@@ -2361,7 +2662,7 @@ fn run_interactive_staffer_brief(
             game.skip_staffer_brief()
                 .map_err(|error| error.to_string())?;
             journal.push(SaveCommand::SkipStaffer);
-            checkpoint_campaign(game, save_path, save_config, journal)?;
+            checkpoint_campaign(game, save_path, save_config, journal);
             println!("關係與承諾更新：{}", game.staffer_progress.memory_summary());
             println!("本次幕僚會議暫不處理；戰役每日行動照常繼續。\n");
             return Ok(true);
@@ -2369,7 +2670,7 @@ fn run_interactive_staffer_brief(
         match game.apply_staffer_choice(selection - 1) {
             Ok(outcome) => {
                 journal.push(SaveCommand::StafferChoice(selection - 1));
-                checkpoint_campaign(game, save_path, save_config, journal)?;
+                checkpoint_campaign(game, save_path, save_config, journal);
                 print_staffer_outcome(game, &outcome);
                 return Ok(true);
             }
@@ -2587,7 +2888,7 @@ fn strategy_engine_for(
 fn select_interactive_action(
     game: &GameState,
     recommendations: &[StrategyRecommendation],
-) -> Result<Option<ActionId>, String> {
+) -> Result<ActionSelection, String> {
     loop {
         let categories: Vec<_> = ActionMenuCategory::ALL
             .iter()
@@ -2613,24 +2914,27 @@ fn select_interactive_action(
                 top.preview.expected_support_delta
             );
         }
-        println!("  r) 執行策略推薦　p) 查看支持度　?) 操作說明　q) 結束本場");
+        println!("  0) 返回當日總覽　r) 執行策略推薦　p) 查看支持度　?) 操作說明　q) 結束本場");
         print!("選分類：");
         io::stdout().flush().map_err(|error| error.to_string())?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| error.to_string())?;
-        let choice = input.trim();
+        let Some(input) = read_console_line()? else {
+            return Ok(ActionSelection::Quit);
+        };
+        let choice = input.as_str();
         if choice.eq_ignore_ascii_case("q") {
             if confirm_end_campaign()? {
-                return Ok(None);
+                return Ok(ActionSelection::Quit);
             }
             continue;
+        }
+        if choice == "0" {
+            return Ok(ActionSelection::BackToDailyOverview);
         }
         if choice.eq_ignore_ascii_case("r") {
             return Ok(recommendations
                 .first()
-                .map(|recommendation| recommendation.preview.id));
+                .map(|recommendation| ActionSelection::Execute(recommendation.preview.id))
+                .unwrap_or(ActionSelection::BackToDailyOverview));
         }
         if choice.eq_ignore_ascii_case("p") {
             print_poll_table(game);
@@ -2644,7 +2948,10 @@ fn select_interactive_action(
             println!("請輸入分類編號、r、p、? 或 q。\n");
             continue;
         };
-        let Some((category, options)) = categories.get(index.saturating_sub(1)) else {
+        let Some(index) = index.checked_sub(1) else {
+            return Ok(ActionSelection::BackToDailyOverview);
+        };
+        let Some((category, options)) = categories.get(index) else {
             println!("沒有這個分類。\n");
             continue;
         };
@@ -2685,26 +2992,26 @@ fn select_interactive_action(
                     infrastructure
                 );
             }
-            print!("選行動（d 編號看詳情，r 本類推薦，p 支持度，b 返回，? 說明，q 結束）：");
+            print!("選行動（d 編號看詳情，r 本類推薦，p 支持度，0/b 返回，? 說明，q 結束）：");
             io::stdout().flush().map_err(|error| error.to_string())?;
-            input.clear();
-            io::stdin()
-                .read_line(&mut input)
-                .map_err(|error| error.to_string())?;
-            let selected = input.trim();
-            if selected.eq_ignore_ascii_case("b") {
+            let Some(input) = read_console_line()? else {
+                return Ok(ActionSelection::Quit);
+            };
+            let selected = input.as_str();
+            if selected.eq_ignore_ascii_case("b") || selected == "0" {
                 break;
             }
             if selected.eq_ignore_ascii_case("q") {
                 if confirm_end_campaign()? {
-                    return Ok(None);
+                    return Ok(ActionSelection::Quit);
                 }
                 continue;
             }
             if selected.eq_ignore_ascii_case("r") {
                 return Ok(options
                     .first()
-                    .map(|recommendation| recommendation.preview.id));
+                    .map(|recommendation| ActionSelection::Execute(recommendation.preview.id))
+                    .unwrap_or(ActionSelection::BackToDailyOverview));
             }
             if selected.eq_ignore_ascii_case("p") {
                 print_poll_table(game);
@@ -2722,7 +3029,11 @@ fn select_interactive_action(
                     println!("請輸入 d 加行動編號，例如 d 2。\n");
                     continue;
                 };
-                if let Some(recommendation) = options.get(option_index.saturating_sub(1)) {
+                let Some(index) = option_index.checked_sub(1) else {
+                    println!("0 返回分類清單。\n");
+                    break;
+                };
+                if let Some(recommendation) = options.get(index) {
                     print_action_details(recommendation);
                 } else {
                     println!("沒有這個行動。\n");
@@ -2733,8 +3044,12 @@ fn select_interactive_action(
                 println!("請輸入行動編號、d 編號、r、p、b、? 或 q。\n");
                 continue;
             };
-            if let Some(recommendation) = options.get(option_index.saturating_sub(1)) {
-                return Ok(Some(recommendation.preview.id));
+            let Some(index) = option_index.checked_sub(1) else {
+                println!("0 返回分類清單。\n");
+                break;
+            };
+            if let Some(recommendation) = options.get(index) {
+                return Ok(ActionSelection::Execute(recommendation.preview.id));
             }
             println!("沒有這個行動。\n");
         }
@@ -3979,7 +4294,7 @@ fn print_final(game: &mut GameState) -> ElectionOutcome {
     result
 }
 
-fn run_primary(seed: u64, auto: bool) -> Result<CampaignStyle, String> {
+fn run_primary(seed: u64, auto: bool) -> Result<Option<CampaignStyle>, String> {
     let mut primary = PrimaryContest::new(seed ^ 0xA11C_E5ED);
     println!("\n=== 黨內初選：提名之爭 ===");
     println!("三位虛構提名路線：政策派、組織派、溝通派。先完成 {PRIMARY_ROUNDS} 回合初選，再進入十二週大選。\n");
@@ -4002,18 +4317,18 @@ fn run_primary(seed: u64, auto: bool) -> Result<CampaignStyle, String> {
             ][primary.round as usize]
         } else {
             loop {
-                print!("選擇策略：");
+                print!("選擇策略（1–5，q 離開初選）：");
                 io::stdout().flush().map_err(|error| error.to_string())?;
-                let mut input = String::new();
-                io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|error| error.to_string())?;
-                let selected = match input.trim() {
+                let Some(input) = read_console_line()? else {
+                    return Ok(None);
+                };
+                let selected = match input.as_str() {
                     "1" => Some(PrimaryChoice::PolicyDebate),
                     "2" => Some(PrimaryChoice::OrganizerVisit),
                     "3" => Some(PrimaryChoice::CommunicationForum),
                     "4" => Some(PrimaryChoice::ComparisonPoll),
                     "5" => Some(PrimaryChoice::UnityNegotiation),
+                    "q" | "Q" | "0" => return Ok(None),
                     _ => None,
                 };
                 if let Some(selected) = selected {
@@ -4033,7 +4348,7 @@ fn run_primary(seed: u64, auto: bool) -> Result<CampaignStyle, String> {
         PrimaryContest::name(nominee),
         primary.polls[nominee]
     );
-    Ok(style)
+    Ok(Some(style))
 }
 
 fn print_primary_polls(primary: &PrimaryContest) {
@@ -4203,6 +4518,7 @@ fn print_usage() {
         "Project-TWN — 臺灣選戰模擬器
 
 使用方式：
+  project-twn --help | --version
   project-twn --scenarios [--history 相容別名]
   project-twn --regions
   project-twn --parties
@@ -4232,14 +4548,14 @@ fn print_usage() {
   cargo run -- --batch 10 --year 2024 --role challenger --seed 1000 --interaction-sensitivity --batch-log interactions.tsv
 
 年份範圍：1996–2026。--scenarios 顯示虛構年表與事件卡（--history 為相容別名）；地方模式可用 --regions 檢視 22 個虛構地區，--parties 檢視虛構政黨範本。
-直接雙擊執行檔且未帶參數時，先選候選人、幕僚或人民罷免模式，再進入陣營／罷免方選擇；也可用 --staffer 或 --recall 直接指定模式。
+直接雙擊執行檔且未帶參數時，先選候選人、幕僚或人民罷免模式，再進入陣營／罷免方選擇；連接互動主控台時，正常結束、出錯或發生 panic 後會等待按 Enter 再關閉；也可用 --staffer 或 --recall 直接指定模式。
 競選為 12 週、每週 7 天，共 84 次每日行動決策；每週有資金補給。--primary 先進行四回合黨內初選。
 --staffer 開啟幕僚模式：設定競選主軸，並在六個關鍵週處理陳情、地方協調、事件回應、支持度檢視與最後布局；幕僚決策不占每日行動，但會消耗預算及影響遊戲資源。此單場模式目前不支援 --batch 或 --primary。
 --recall 開啟人民罷免模式：在罷免提議／連署方或反對罷免方之間選擇，進行 14 日提議、60 日連署與 28 日投票宣傳；可選虛構的低投票參與、集中支持或高強度動員盤型。本模式不含彈劾；遊戲中人物與事件皆採虛構合成，不對應真實對象。不實／死亡連署是違規高風險行動，不計入有效連署，遭查核會受遊戲內懲處。
 --roster-editor 會建立 2–5 人的虛構候選人名冊 TSV；--roster 可將姓名、虛構政黨及起始支持度套用到單場戰役。名冊只接受內建虛構政黨，須明確指定唯一一位玩家候選人。
 --save 會在互動戰役開始及每次有效決策後原子更新版本化 TSV 存檔；--load 會依固定 seed 重播決策紀錄後接續遊玩，適用候選人、幕僚及罷免模式。自動示範與批次模式不支援存檔；舊版或未知版本存檔會拒絕載入。
 難度可選故事／標準／挑戰；事件包可篩選制度參與、區域安全、地方民生或媒體信任等虛構議題；--timeline date 會將虛構事件的遊戲日期錨點映射到 12 週戰役日曆，沒有錨點的週次留白。
-省略單場模式的 --role 會詢問陣營；--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
+省略單場模式的 --role 會詢問陣營；未指定 --seed 時使用本次啟動產生的種子，明確傳入 --seed 可重現結果。--auto 依所選策略逐日選擇引擎排序最高的合法行動。--log 記錄單場戰役；--batch-log 記錄批次每一 seed 的原始跑次結果。
 策略引擎將各合法行動的支持度估值、事件／地方契合、信任、動員、每週任務、資源續航、誠信風險及組織基礎拆成可組合模組；共通行動涵蓋總部／後援會、地面動員、公共溝通與社區服務，另有會受查核懲處的高風險負面行動。
 --strategy 選擇七種權重組合，互動模式顯示行動分類、排序及預估揭露風險，--auto 依排序採取行動。
 策略分數是遊戲啟發式，支持度是模型一步期望值；執行後另外顯示含 seed 波動與對手反應的實際變化，兩者都不是民調或選舉預測。
