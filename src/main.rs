@@ -121,6 +121,14 @@ enum ActionSelection {
     Quit,
 }
 
+struct CampaignSession<'a> {
+    journal: &'a mut Vec<SaveCommand>,
+    save_path: Option<&'a str>,
+    save_config: &'a CampaignSaveConfig,
+    initial_command_count: usize,
+    save_ready: bool,
+}
+
 impl ActionMenuCategory {
     const ALL: [Self; 7] = [
         Self::PolicyGovernance,
@@ -595,11 +603,13 @@ fn run() -> Result<(), String> {
             &mut game,
             options.strategy,
             options.staffer_mode,
-            &mut journal,
-            options.save_path.as_deref(),
-            &save_config,
-            initial_command_count,
-            save_ready,
+            CampaignSession {
+                journal: &mut journal,
+                save_path: options.save_path.as_deref(),
+                save_config: &save_config,
+                initial_command_count,
+                save_ready,
+            },
         )?;
         if !completed {
             return Ok(());
@@ -2307,12 +2317,15 @@ fn run_interactive(
     game: &mut GameState,
     strategy: StrategyProfile,
     staffer_mode: bool,
-    journal: &mut Vec<SaveCommand>,
-    save_path: Option<&str>,
-    save_config: &CampaignSaveConfig,
-    initial_command_count: usize,
-    save_ready: bool,
+    session: CampaignSession<'_>,
 ) -> Result<bool, String> {
+    let CampaignSession {
+        journal,
+        save_path,
+        save_config,
+        initial_command_count,
+        save_ready,
+    } = session;
     let mut quit_requested = false;
     'campaign: while !game.is_finished() {
         println!(
