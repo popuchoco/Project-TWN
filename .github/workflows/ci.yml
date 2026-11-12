@@ -257,12 +257,12 @@ jobs:
           $roster = Get-Content target/ci-roster-campaign.txt -Raw
           $recallResume = Get-Content target/ci-recall-resumed-session.txt -Raw
           $stafferResume = Get-Content target/ci-staffer-resumed-session.txt -Raw
-          if (-not $resume.Contains("投票日開票｜虛構情境估算") -or -not $resume.Contains("本區票數：") -or -not $resume.Contains("全國候選人總票數：") -or -not $resume.Contains("全國政黨票／不分區席次情境")) { throw "Resumed presidential save did not resolve detailed regional count and party-list seats." }
+          if (-not $resume.Contains("已離開競選戰役") -or $resume.Contains("投票日開票｜虛構情境估算")) { throw "Leaving a loaded presidential save should preserve its open checkpoint instead of settling it." }
           if (-not $roster.Contains("玩家操控：沈知行｜政黨／名單：群島共治黨") -or -not $roster.Contains("22 個虛構地區")) { throw "Candidate roster was not applied to the election-night simulation." }
           if (-not $recallResume.Contains("第 7 / 14 日") -or -not $recallResume.Contains("符合本作可罷免對象條件")) { throw "Recall save did not resume its deterministic phase and eligible fictional target." }
           if (-not $recallResume.Contains("一次補提") -or -not $recallResume.Contains("符合本作可罷免對象條件")) { throw "Recall mode omitted eligibility or the one-time supplement process." }
           if (-not $recallResume.Contains("志工隊長高原澤 1")) { throw "Recall save replay did not reconstruct the relationship memory." }
-          if (-not $stafferResume.Contains("遊戲模式：幕僚模式") -or -not $stafferResume.Contains("投票日開票｜虛構情境估算")) { throw "Staffer save did not resume the selected mode and resolve its final count." }
+          if (-not $stafferResume.Contains("遊戲模式：幕僚模式") -or -not $stafferResume.Contains("已離開競選戰役") -or $stafferResume.Contains("投票日開票｜虛構情境估算")) { throw "Leaving a loaded staffer save should preserve its open checkpoint instead of settling it." }
 
       - name: Smoke-test local candidate and party status labels
         run: |
